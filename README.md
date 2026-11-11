@@ -60,7 +60,32 @@ Kein Multiverse nötig. Alles direkt im Server:
 | `/wm pregen <welt> <radius>` | Welt im Hintergrund **vorgenerieren** |
 | `/wm list` · `/wm info <name>` · `/wm setspawn` · `/wm autoload <name> <true\|false>` | Übersicht und Verwaltung |
 
-Geladene Welten merkt sich Tachyon in `tachyon.yml` und lädt sie nach einem Neustart automatisch – gestaffelt, nicht alle auf einmal.
+Geladene Welten merkt sich Tachyon in `tachyon.yml` und lädt sie nach einem Neustart automatisch – gestaffelt, nicht alle auf einmal. Jeder Ladevorgang zeigt einen **Live-Ladebalken** unten in der Konsole.
+
+### 🔐 Rechte für jeden Befehl
+Nicht jeder soll Welten erstellen oder löschen dürfen. Jeder `/wm`-Befehl hat einen eigenen Permission-Knoten – standardmäßig **nur für OPs**. Mit jedem Permission-Plugin (z. B. LuckPerms) verteilst du sie gezielt:
+
+| Permission | Erlaubt |
+|---|---|
+| `tachyon.wm.*` | alles |
+| `tachyon.wm.create` · `load` · `unload` · `delete` · `clone` | Welten verwalten |
+| `tachyon.wm.tp` · `tachyon.wm.tp.others` | Teleport (selbst / andere Spieler) |
+| `tachyon.wm.list` · `info` · `setspawn` · `autoload` · `pregen` · `reload` | Übersicht und Werkzeuge |
+
+Wer einen Befehl nicht darf, sieht ihn auch nicht in Hilfe und Tab-Vervollständigung.
+
+### 🧩 API für Plugins
+Plugins können den World-Manager direkt nutzen – alles ohne Server-Hänger, mit `CompletableFuture`:
+
+```java
+if (TachyonAPI.isAvailable()) {
+    TachyonAPI.worlds()
+        .createWorld(WorldOptions.builder("arena").type(WorldOptions.Type.VOID).build())
+        .thenAccept(world -> player.teleport(world.getSpawnLocation()));
+}
+```
+
+Dazu: `loadWorld`, `unloadWorld`, `deleteWorld`, `cloneWorld`, `whenReady`, `teleportWhenReady`, `startPregen`, `getManagedWorlds` und das Event **`TachyonWorldReadyEvent`**, sobald eine Welt bereit ist. Zum Kompilieren gegen die API: `build-tachyon` ausführen – es installiert die API (`org.spigotmc:spigot-api:26.3-R0.1-SNAPSHOT` mit Tachyon-Erweiterungen) in dein lokales Maven-Repository.
 
 ### 🗺️ Pregenerator, der sich selbst bremst
 `/wm pregen world 5000` generiert die Welt im Voraus, damit beim Erkunden nichts mehr ruckelt. Der Pregenerator **pausiert automatisch**, sobald ein Tick länger als 50 ms dauert – Spieler haben immer Vorrang.
@@ -83,10 +108,26 @@ Damit das überhaupt geht, startet Tachyon den Server direkt über den Classpath
 
 ### 🖥️ Konsole, die Spaß macht
 - Farbiges Banner und **ein einziger Ladebalken**, der sich live aktualisiert – statt hunderter Log-Zeilen.
-- Beim Start erscheinen nur **Warnungen und Fehler**. Alles andere landet wie gewohnt vollständig in `logs/latest.log`.
-- Am Ende eine **Zusammenfassung**: Startzeit, Port, Slots, Whitelist, Welten, Plugins, RAM und ob es Probleme gab.
-- Danach eingefärbte Logs: Joins grün, Leaves gelb, Befehle lila, Warnungen gelb, Fehler rot.
-- In Hosting-Panels (keine echte Konsole) automatisch schlichter Text. `-Dtachyon.verboseStartup=true` bringt das klassische Log zurück.
+- **Kein Spam:** Beim Start erscheinen nur Warnungen und Fehler. Die 30 Zeilen „World Settings“ pro Welt, „Saving chunks…“ und ähnliche Routine laufen nur noch ins Logfile.
+- **Live-Balken im Betrieb:** Welt laden, Welt erstellen und `/wm pregen` zeigen einen Fortschrittsbalken unten in der Konsole – du kannst währenddessen weiter tippen. Am Ende bleibt genau eine Zeile: „✔ Welt 'arena' bereit“.
+- Am Ende des Starts eine **Zusammenfassung**: Startzeit, Port, Slots, Whitelist, Welten, Plugins, RAM und ob es Probleme gab.
+- Eingefärbte Logs: Joins grün, Leaves gelb, Befehle lila, Warnungen gelb, Fehler rot.
+- Funktioniert im Windows Terminal und im klassischen Konsolenfenster. In Hosting-Panels automatisch schlichter Text. `-Dtachyon.verboseStartup=true` bringt das klassische Log zurück.
+
+### 🌐 Deutsch oder Englisch
+Beim ersten Start fragt Tachyon in der Konsole nach der Sprache. Alle Tachyon-Texte – Konsole, Ladebalken, Zusammenfassung, `/wm`, `/tps`, Startdatei – folgen dieser Wahl. Ändern: `language: de` oder `language: en` in `tachyon.yml`.
+
+### ✅ EULA direkt in der Konsole
+Kein „eula.txt bearbeiten und neu starten“ mehr: Tachyon fragt beim ersten Start „EULA akzeptieren? (ja/nein)“ und **startet direkt weiter**.
+
+### 📊 `/tps` und Befehle im Look großer Server
+`/tps` zeigt TPS (1/5/15 min), MSPT inklusive Spitzenwert, RAM und Welt-Statistiken – mit Farbverlauf-Präfix, Balken und Ampelfarben. Alle Tachyon-Meldungen nutzen denselben Stil.
+
+### 🧠 Dynamische Leistung
+In `Start-Tachyon.bat` legst du einen **Bereich** fest – `RAM_MIN`, `RAM_MAX` und optional `CPU_MAX`. Der Server startet klein, holt sich Speicher, wenn er ihn braucht, und **gibt ihn im Leerlauf wieder ans System zurück** (periodische, nebenläufige G1-Läufe – ohne Pausen im Spiel). Ohne Spieler pausiert Minecraft außerdem das Ticken (`pause-when-empty-seconds`).
+
+### 📦 Weniger Item- und XP-Entities
+Drops werden in einem größeren Radius zusammengefasst (Items 3,5 statt 2,5 Blöcke, XP 4,0 statt 3,0). Gerade bei Farmen heißt das deutlich weniger Entities pro Tick.
 
 ### 🛠️ Fixes und Aufräumarbeiten
 - **Bugfix:** Spigot wirft beim Stoppen `AsyncStructureSpawnEvent cannot be triggered asynchronously from primary server thread`, wenn gerade noch Chunks generiert werden – das Herunterfahren schlägt dann fehl. Behoben.
@@ -129,10 +170,10 @@ Das Skript lädt BuildTools, baut Spigot 26.3 (Build 4664), spielt die Tachyon-P
 
 ### Starten
 1. `tachyon-26.3.jar` und `Start-Tachyon.bat` (bzw. `start-tachyon.sh`) in deinen Server-Ordner legen.
-2. Starten. Beim ersten Start wird `eula.txt` angelegt: Minecraft-EULA lesen, `eula=true` setzen, nochmal starten.
+2. Starten. Tachyon fragt nach der Sprache und nach der Minecraft-EULA – einfach in der Konsole antworten, der Server startet direkt weiter.
 3. Ab dem zweiten Start trainiert Tachyon einmalig den Start-Cache – danach geht's in Sekunden.
 
-RAM einstellen: oben in `Start-Tachyon.bat` die Zeile `set RAM=4G` anpassen (bei `start-tachyon.sh`: `RAM=8G ./start-tachyon.sh`).
+Leistung einstellen: oben in `Start-Tachyon.bat` `RAM_MIN`, `RAM_MAX` und `CPU_MAX` anpassen (bei `start-tachyon.sh`: `RAM_MAX=8G CPU_MAX=4 ./start-tachyon.sh`).
 
 **Plugins:** Tachyon ist ein Spigot-Fork – Bukkit- und Spigot-Plugins laufen wie gewohnt.
 
@@ -141,6 +182,7 @@ RAM einstellen: oben in `Start-Tachyon.bat` die Zeile `set RAM=4G` anpassen (bei
 ## Konfiguration (`tachyon.yml`)
 
 ```yaml
+language: de                                # de oder en
 startup:
   fast-start: true                          # nicht auf die Spawnsuche warten
 world-manager:
@@ -167,8 +209,8 @@ Startet beide Server nacheinander in eigenen Testordnern (gleicher Seed, gleiche
 
 | Pfad | Inhalt |
 |---|---|
-| `patches/tachyon-server.patch` | Alle Änderungen am Server (World-Manager, Konsole, Start, Fixes) |
-| `patches/tachyon-api.patch` | Änderungen an der Spigot-API (paralleles Plugin-Laden, Event-Fix) |
+| `patches/tachyon-server.patch` | Alle Änderungen am Server (World-Manager, Rechte, Sprachen, Konsole, Start, Fixes) |
+| `patches/tachyon-api.patch` | Tachyon-API für Plugins, paralleles Plugin-Laden, Event-Fix |
 | `build-tachyon.bat` / `.sh` | Baut die Jar lokal |
 | `Start-Tachyon.bat` / `start-tachyon.sh` | Startdateien mit AOT-Cache und G1-Tuning |
 | `benchmark/` | Vergleichs-Benchmark inkl. Mess-Plugin |

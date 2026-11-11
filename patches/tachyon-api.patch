@@ -1,3 +1,373 @@
+diff --git a/src/main/java/dev/tachyon/api/TachyonAPI.java b/src/main/java/dev/tachyon/api/TachyonAPI.java
+new file mode 100644
+index 00000000..371d453d
+--- /dev/null
++++ b/src/main/java/dev/tachyon/api/TachyonAPI.java
+@@ -0,0 +1,46 @@
++package dev.tachyon.api;
++
++import com.google.common.base.Preconditions;
++import org.jetbrains.annotations.ApiStatus;
++import org.jetbrains.annotations.NotNull;
++import org.jetbrains.annotations.Nullable;
++
++/**
++ * Einstiegspunkt der Tachyon-API.
++ * <p>
++ * Pruefen, ob der Server Tachyon ist: {@link #isAvailable()}.
++ */
++public final class TachyonAPI {
++
++    private static TachyonWorlds worlds;
++
++    private TachyonAPI() {
++    }
++
++    /**
++     * @return true, wenn der Server Tachyon ist und die API bereitsteht
++     */
++    public static boolean isAvailable() {
++        return worlds != null;
++    }
++
++    /**
++     * @return der World-Manager
++     * @throws IllegalStateException wenn der Server nicht Tachyon ist
++     */
++    @NotNull
++    public static TachyonWorlds worlds() {
++        Preconditions.checkState(worlds != null, "Tachyon-API nicht verfuegbar (laeuft der Server mit Tachyon?)");
++        return worlds;
++    }
++
++    /**
++     * Wird vom Server beim Start gesetzt. Nicht von Plugins aufrufen.
++     *
++     * @param implementation Implementierung des World-Managers
++     */
++    @ApiStatus.Internal
++    public static void setWorlds(@Nullable TachyonWorlds implementation) {
++        worlds = implementation;
++    }
++}
+diff --git a/src/main/java/dev/tachyon/api/TachyonWorldReadyEvent.java b/src/main/java/dev/tachyon/api/TachyonWorldReadyEvent.java
+new file mode 100644
+index 00000000..db00937a
+--- /dev/null
++++ b/src/main/java/dev/tachyon/api/TachyonWorldReadyEvent.java
+@@ -0,0 +1,46 @@
++package dev.tachyon.api;
++
++import org.bukkit.World;
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.world.WorldEvent;
++import org.jetbrains.annotations.NotNull;
++
++/**
++ * Wird ausgeloest, sobald eine vom Tachyon World-Manager erstellte oder geladene Welt
++ * bereit ist, also der Spawnbereich fertig generiert wurde.
++ */
++public class TachyonWorldReadyEvent extends WorldEvent {
++
++    private static final HandlerList HANDLERS = new HandlerList();
++    private final boolean created;
++
++    /**
++     * @param world die Welt
++     * @param created true, wenn die Welt neu erstellt (und nicht nur geladen) wurde
++     */
++    public TachyonWorldReadyEvent(@NotNull World world, boolean created) {
++        super(world);
++        this.created = created;
++    }
++
++    /**
++     * @return true, wenn die Welt neu erstellt wurde
++     */
++    public boolean isCreated() {
++        return created;
++    }
++
++    @NotNull
++    @Override
++    public HandlerList getHandlers() {
++        return HANDLERS;
++    }
++
++    /**
++     * @return Handler-Liste dieses Events
++     */
++    @NotNull
++    public static HandlerList getHandlerList() {
++        return HANDLERS;
++    }
++}
+diff --git a/src/main/java/dev/tachyon/api/TachyonWorlds.java b/src/main/java/dev/tachyon/api/TachyonWorlds.java
+new file mode 100644
+index 00000000..e127fbc1
+--- /dev/null
++++ b/src/main/java/dev/tachyon/api/TachyonWorlds.java
+@@ -0,0 +1,120 @@
++package dev.tachyon.api;
++
++import java.util.Set;
++import java.util.concurrent.CompletableFuture;
++import org.bukkit.World;
++import org.bukkit.entity.Player;
++import org.jetbrains.annotations.NotNull;
++import org.jetbrains.annotations.Nullable;
++
++/**
++ * Der eingebaute World-Manager von Tachyon fuer Plugins.
++ * <p>
++ * Alle Methoden muessen auf dem Server-Thread aufgerufen werden. Welten werden ohne
++ * Server-Haenger erstellt: Die Futures werden auf dem Server-Thread abgeschlossen,
++ * sobald der Spawnbereich generiert ist.
++ *
++ * <pre>{@code
++ * TachyonWorlds worlds = TachyonAPI.worlds();
++ * worlds.createWorld(WorldOptions.builder("arena").type(WorldOptions.Type.VOID).build())
++ *       .thenAccept(world -> player.teleport(world.getSpawnLocation()));
++ * }</pre>
++ */
++public interface TachyonWorlds {
++
++    /**
++     * Erstellt eine neue Welt (oder laedt sie, falls der Ordner schon existiert).
++     *
++     * @param options Einstellungen der Welt
++     * @return wird mit der Welt abgeschlossen, sobald sie bereit ist
++     */
++    @NotNull
++    CompletableFuture<World> createWorld(@NotNull WorldOptions options);
++
++    /**
++     * Laedt einen vorhandenen Weltordner.
++     *
++     * @param name Name des Weltordners
++     * @return wird mit der Welt abgeschlossen, sobald sie bereit ist
++     */
++    @NotNull
++    CompletableFuture<World> loadWorld(@NotNull String name);
++
++    /**
++     * Entlaedt eine Welt. Spieler darin werden zum Spawn der Hauptwelt gebracht.
++     *
++     * @param name Name der Welt
++     * @param save vorher speichern
++     * @return true bei Erfolg
++     */
++    boolean unloadWorld(@NotNull String name, boolean save);
++
++    /**
++     * Entlaedt eine Welt und loescht ihren Ordner im Hintergrund.
++     *
++     * @param name Name der Welt
++     * @return wird abgeschlossen, sobald der Ordner geloescht ist
++     */
++    @NotNull
++    CompletableFuture<Void> deleteWorld(@NotNull String name);
++
++    /**
++     * Kopiert eine (entladene) Welt im Hintergrund und laedt die Kopie.
++     *
++     * @param source Name der Quellwelt
++     * @param target Name der neuen Welt
++     * @return wird mit der neuen Welt abgeschlossen, sobald sie bereit ist
++     */
++    @NotNull
++    CompletableFuture<World> cloneWorld(@NotNull String source, @NotNull String target);
++
++    /**
++     * @param world eine geladene Welt
++     * @return true, wenn der Spawnbereich fertig generiert ist
++     */
++    boolean isReady(@NotNull World world);
++
++    /**
++     * @param world eine geladene Welt
++     * @return wird abgeschlossen, sobald die Welt bereit ist (sofort, wenn sie es schon ist)
++     */
++    @NotNull
++    CompletableFuture<World> whenReady(@NotNull World world);
++
++    /**
++     * Teleportiert einen Spieler zum Spawn der Welt, sobald sie bereit ist.
++     *
++     * @param player Spieler
++     * @param world Zielwelt
++     */
++    void teleportWhenReady(@NotNull Player player, @NotNull World world);
++
++    /**
++     * Startet die Vorgenerierung um den Spawn. Sie pausiert automatisch bei Lag.
++     *
++     * @param world Welt
++     * @param radiusBlocks Radius in Bloecken
++     * @return null bei Erfolg, sonst eine Fehlermeldung
++     */
++    @Nullable
++    String startPregen(@NotNull World world, int radiusBlocks);
++
++    /**
++     * Stoppt eine laufende Vorgenerierung.
++     *
++     * @return true, wenn eine lief
++     */
++    boolean stopPregen();
++
++    /**
++     * @return Namen aller Welten, die der World-Manager verwaltet (tachyon.yml)
++     */
++    @NotNull
++    Set<String> getManagedWorlds();
++
++    /**
++     * @param name Name der Welt
++     * @param autoload beim Serverstart automatisch laden
++     */
++    void setAutoload(@NotNull String name, boolean autoload);
++}
+diff --git a/src/main/java/dev/tachyon/api/WorldOptions.java b/src/main/java/dev/tachyon/api/WorldOptions.java
+new file mode 100644
+index 00000000..5dd6fa68
+--- /dev/null
++++ b/src/main/java/dev/tachyon/api/WorldOptions.java
+@@ -0,0 +1,134 @@
++package dev.tachyon.api;
++
++import com.google.common.base.Preconditions;
++import org.bukkit.World;
++import org.jetbrains.annotations.NotNull;
++import org.jetbrains.annotations.Nullable;
++
++/**
++ * Einstellungen fuer eine neue Welt im Tachyon World-Manager.
++ *
++ * @param name Name des Weltordners (A-Z, a-z, 0-9, _ und -)
++ * @param environment Umgebung (Oberwelt, Nether, End)
++ * @param type Art der Generierung
++ * @param seed Seed oder null fuer zufaellig
++ * @param structures Strukturen (Doerfer usw.) generieren
++ * @param autoload beim Serverstart automatisch laden
++ */
++public record WorldOptions(@NotNull String name, @NotNull World.Environment environment, @NotNull Type type, @Nullable Long seed, boolean structures, boolean autoload) {
++
++    /**
++     * Art der Generierung.
++     */
++    public enum Type {
++        /** Normale Welt. */
++        NORMAL,
++        /** Flachland. */
++        FLAT,
++        /** Zerkluftet. */
++        AMPLIFIED,
++        /** Grosse Biome. */
++        LARGE_BIOMES,
++        /** Leere Welt mit einem Block unter dem Spawn. */
++        VOID
++    }
++
++    /**
++     * Prueft die Werte.
++     *
++     * @param name Name des Weltordners
++     * @param environment Umgebung
++     * @param type Art der Generierung
++     * @param seed Seed oder null
++     * @param structures Strukturen generieren
++     * @param autoload beim Start laden
++     */
++    public WorldOptions {
++        Preconditions.checkArgument(name != null && name.matches("[A-Za-z0-9_\\-]{1,64}"), "Ungueltiger Weltname: %s", name);
++        Preconditions.checkArgument(environment != null, "environment");
++        Preconditions.checkArgument(type != null, "type");
++    }
++
++    /**
++     * @param name Name des Weltordners
++     * @return neuer Builder mit Standardwerten (Oberwelt, normal, zufaelliger Seed, Strukturen, Autoload)
++     */
++    @NotNull
++    public static Builder builder(@NotNull String name) {
++        return new Builder(name);
++    }
++
++    /**
++     * Builder fuer {@link WorldOptions}.
++     */
++    public static final class Builder {
++        private final String name;
++        private World.Environment environment = World.Environment.NORMAL;
++        private Type type = Type.NORMAL;
++        private Long seed;
++        private boolean structures = true;
++        private boolean autoload = true;
++
++        private Builder(@NotNull String name) {
++            this.name = name;
++        }
++
++        /**
++         * @param environment Umgebung
++         * @return dieser Builder
++         */
++        @NotNull
++        public Builder environment(@NotNull World.Environment environment) {
++            this.environment = environment;
++            return this;
++        }
++
++        /**
++         * @param type Art der Generierung
++         * @return dieser Builder
++         */
++        @NotNull
++        public Builder type(@NotNull Type type) {
++            this.type = type;
++            return this;
++        }
++
++        /**
++         * @param seed Seed oder null fuer zufaellig
++         * @return dieser Builder
++         */
++        @NotNull
++        public Builder seed(@Nullable Long seed) {
++            this.seed = seed;
++            return this;
++        }
++
++        /**
++         * @param structures Strukturen generieren
++         * @return dieser Builder
++         */
++        @NotNull
++        public Builder structures(boolean structures) {
++            this.structures = structures;
++            return this;
++        }
++
++        /**
++         * @param autoload beim Serverstart automatisch laden
++         * @return dieser Builder
++         */
++        @NotNull
++        public Builder autoload(boolean autoload) {
++            this.autoload = autoload;
++            return this;
++        }
++
++        /**
++         * @return fertige Einstellungen
++         */
++        @NotNull
++        public WorldOptions build() {
++            return new WorldOptions(name, environment, type, seed, structures, autoload);
++        }
++    }
++}
 diff --git a/src/main/java/org/bukkit/event/world/AsyncStructureSpawnEvent.java b/src/main/java/org/bukkit/event/world/AsyncStructureSpawnEvent.java
 index 5f05b32b..a7b7f1ab 100644
 --- a/src/main/java/org/bukkit/event/world/AsyncStructureSpawnEvent.java

@@ -39,13 +39,15 @@ index 000000000..60f72ddb8
 +}
 diff --git a/src/main/java/dev/tachyon/console/TachyonConsole.java b/src/main/java/dev/tachyon/console/TachyonConsole.java
 new file mode 100644
-index 000000000..4653472cb
+index 000000000..6b330850d
 --- /dev/null
 +++ b/src/main/java/dev/tachyon/console/TachyonConsole.java
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,646 @@
 +package dev.tachyon.console;
 +
 +import dev.tachyon.Tachyon;
++import dev.tachyon.i18n.Lang;
++import static dev.tachyon.i18n.Lang.t;
 +import java.io.PrintStream;
 +import java.lang.management.ManagementFactory;
 +import java.util.ArrayList;
@@ -176,11 +178,14 @@ index 000000000..4653472cb
 +            OUT.println("   " + (COLOR ? "\u001B[1;38;5;" + GRADIENT[i] + "m" : "") + LOGO[i] + c(RESET));
 +        }
 +        OUT.println();
++        if (Lang.needsChoice()) {
++            askLanguage();
++        }
 +        OUT.println("   " + c(BOLD) + Tachyon.NAME + " " + Tachyon.MC_VERSION + c(RESET) + c(DIM)
-+                + SEP + "Minecraft-Server ohne Lags" + SEP + "Java " + Runtime.version().feature()
-+                + SEP + formatMb(rt.maxMemory()) + " RAM" + SEP + rt.availableProcessors() + " Threads" + c(RESET));
++                + SEP + t("console.tagline") + SEP + "Java " + Runtime.version().feature()
++                + SEP + formatMb(rt.maxMemory()) + " " + t("console.ram") + SEP + rt.availableProcessors() + " " + t("console.threads") + c(RESET));
 +        OUT.println();
-+        progress(0.05, "Java gestartet");
++        progress(0.05, t("progress.java"));
 +    }
 +
 +    /** Fortschritt melden (0..1). Im Terminal wird dieselbe Zeile ueberschrieben. */
@@ -209,15 +214,111 @@ index 000000000..4653472cb
 +    }
 +
 +    /** Hauptphasen des Starts. */
-+    public static void step(String name) {
-+        double f = switch (name) {
-+            case "Minecraft-Kern geladen" -> 0.35;
-+            case "Konfiguration & Datapacks" -> 0.50;
-+            case "Plugins geladen" -> 0.75;
-+            case "Welten geladen" -> 0.97;
++    public static void step(String key) {
++        double f = switch (key) {
++            case "core" -> 0.35;
++            case "config" -> 0.50;
++            case "plugins" -> 0.75;
++            case "worlds" -> 0.97;
 +            default -> 0.05;
 +        };
-+        progress(f, name);
++        progress(f, t("progress." + key));
++    }
++
++    // ------------------------------------------------------------------ Fragen in der Konsole (erster Start)
++
++    /** Liest eine Zeile direkt von der Konsole (vor dem Start von jline). null = keine Eingabe moeglich. */
++    private static String readLine() {
++        try {
++            StringBuilder sb = new StringBuilder();
++            int b;
++            while ((b = System.in.read()) != -1) {
++                if (b == '\n') {
++                    return sb.toString().strip();
++                }
++                if (b != '\r') {
++                    sb.append((char) b);
++                }
++            }
++            return sb.length() > 0 ? sb.toString().strip() : null;
++        } catch (java.io.IOException e) {
++            return null;
++        }
++    }
++
++    /** Sprachwahl beim ersten Start. Enter = Systemsprache. */
++    private static void askLanguage() {
++        String def = Lang.systemDefault();
++        synchronized (LOCK) {
++            OUT.println("   " + c(BOLD) + c(CYAN) + "Sprache waehlen / Choose language" + c(RESET));
++            OUT.println("     " + c(BOLD) + "[1]" + c(RESET) + " Deutsch" + ("de".equals(def) ? c(DIM) + "  (Enter)" + c(RESET) : ""));
++            OUT.println("     " + c(BOLD) + "[2]" + c(RESET) + " English" + ("en".equals(def) ? c(DIM) + "  (Enter)" + c(RESET) : ""));
++            OUT.print("   > ");
++            OUT.flush();
++        }
++        String in = readLine();
++        String choice = def;
++        if (in != null) {
++            String v = in.toLowerCase(Locale.ROOT);
++            if (v.equals("1") || v.startsWith("de")) {
++                choice = "de";
++            } else if (v.equals("2") || v.startsWith("en")) {
++                choice = "en";
++            }
++        }
++        Lang.choose(choice);
++        OUT.println("   " + c(GREEN) + t("setup.language.chosen") + c(RESET));
++        OUT.println();
++    }
++
++    /**
++     * EULA direkt in der Konsole annehmen, damit man den Server nicht neu starten muss.
++     *
++     * @param eulaFile Pfad zur eula.txt
++     * @return true, wenn angenommen (eula.txt wurde geschrieben)
++     */
++    public static boolean askEula(java.nio.file.Path eulaFile) {
++        synchronized (LOCK) {
++            if (INTERACTIVE) {
++                OUT.print(CLEAR_LINE);
++            }
++            OUT.println();
++            OUT.println("   " + c(BOLD) + c(YELLOW) + t("setup.eula.title") + c(RESET));
++            OUT.println("   " + t("setup.eula.text"));
++            OUT.println("   " + c(CYAN) + "https://aka.ms/MinecraftEULA" + c(RESET));
++            OUT.print("   " + c(BOLD) + t("setup.eula.question") + c(RESET));
++            OUT.flush();
++        }
++        String in = readLine();
++        boolean yes = false;
++        if (in != null) {
++            for (String word : t("setup.eula.yes").split(",")) {
++                if (in.equalsIgnoreCase(word.strip())) {
++                    yes = true;
++                    break;
++                }
++            }
++        }
++        if (!yes) {
++            OUT.println("   " + c(RED) + t("setup.eula.declined") + c(RESET));
++            return false;
++        }
++        try {
++            java.nio.file.Files.writeString(eulaFile, "#By changing the setting below to TRUE you are indicating your agreement to our EULA (https://aka.ms/MinecraftEULA).\n"
++                    + "#" + java.time.ZonedDateTime.now() + "\neula=true\n", java.nio.charset.StandardCharsets.UTF_8);
++        } catch (java.io.IOException e) {
++            OUT.println("   " + c(RED) + e.getMessage() + c(RESET));
++            return false;
++        }
++        OUT.println("   " + c(GREEN) + t("setup.eula.accepted") + c(RESET));
++        OUT.println();
++        synchronized (LOCK) {
++            if (!barLine.isEmpty()) {
++                OUT.print(INTERACTIVE ? barLine : "");
++                OUT.flush();
++            }
++        }
++        return true;
 +    }
 +
 +    /** Unterschritt innerhalb einer Phase, z.B. Plugin 3 von 12 (von..bis = Anteil am Gesamtbalken). */
@@ -285,6 +386,100 @@ index 000000000..4653472cb
 +        loggerMode = true;
 +    }
 +
++    // ------------------------------------------------------------------ Live-Balken im laufenden Betrieb (Statuszeile unten)
++
++    private static volatile org.jline.terminal.Terminal terminal;
++    private static org.jline.utils.Status status;
++    private static final java.util.Map<String, String> LIVE = new java.util.LinkedHashMap<>();
++
++    /** Lock, den auch der Konsolen-Thread beim Schreiben nutzt (damit sich Log und Statuszeile nicht zerschneiden). */
++    public static Object outputLock() {
++        return LOCK;
++    }
++
++    /** Vom Konsolen-Thread: echtes Terminal fuer die Statuszeile merken. */
++    public static void attachTerminal(org.jline.terminal.Terminal t) {
++        if (COLOR && t != null && !t.getType().startsWith(org.jline.terminal.Terminal.TYPE_DUMB)) {
++            terminal = t;
++        }
++    }
++
++    /** @return true, wenn Live-Balken angezeigt werden koennen (echtes Terminal, Start abgeschlossen) */
++    public static boolean liveSupported() {
++        return terminal != null && !startupActive;
++    }
++
++    /**
++     * Zeigt oder aktualisiert einen Live-Balken unten in der Konsole.
++     *
++     * @param id eindeutige Kennung (z.B. "world:test")
++     * @param fraction Fortschritt 0..1
++     * @param label Beschriftung
++     * @param seconds bisherige Dauer
++     */
++    public static void live(String id, double fraction, String label, double seconds) {
++        if (!liveSupported()) {
++            return;
++        }
++        int width = 24;
++        double f = Math.max(0, Math.min(1, fraction));
++        int filled = (int) Math.round(width * f);
++        String line = " " + CYAN + "\u2588".repeat(filled) + DIM + "\u2591".repeat(width - filled) + RESET
++                + BOLD + String.format(" %3d%%", Math.round(f * 100)) + RESET + "  " + label
++                + DIM + String.format(Locale.GERMANY, "  %.1f s", seconds) + RESET;
++        synchronized (LOCK) {
++            LIVE.put(id, line);
++            redrawLive();
++        }
++    }
++
++    /** Entfernt einen Live-Balken. */
++    public static void liveDone(String id) {
++        synchronized (LOCK) {
++            if (LIVE.remove(id) != null) {
++                redrawLive();
++            }
++        }
++    }
++
++    private static void redrawLive() {
++        org.jline.terminal.Terminal t = terminal;
++        if (t == null) {
++            return;
++        }
++        try {
++            if (status == null) {
++                status = org.jline.utils.Status.getStatus(t);
++                if (status == null) {
++                    terminal = null;
++                    return;
++                }
++            }
++            List<org.jline.utils.AttributedString> lines = new ArrayList<>();
++            for (String l : LIVE.values()) {
++                lines.add(org.jline.utils.AttributedString.fromAnsi(l));
++            }
++            status.update(lines);
++        } catch (Throwable e) {
++            terminal = null; // Terminal kann keine Statuszeile: dann eben ohne Live-Balken
++        }
++    }
++
++    /**
++     * Routine-Meldungen, die nur ins Logfile gehoeren (die Konsole bleibt ruhig).
++     *
++     * @param msg Nachricht einer INFO-Zeile
++     * @return true, wenn die Zeile nicht in der Konsole erscheinen soll
++     */
++    public static boolean isNoise(String msg) {
++        if (VERBOSE) {
++            return false;
++        }
++        return msg.startsWith("Saving chunks for level ") || msg.contains("All chunks are saved")
++                || msg.startsWith("ThreadedAnvilChunkStorage") || msg.startsWith("Preparing start region")
++                || msg.startsWith("Selecting global world spawn");
++    }
++
 +    /** Die Konsolen-Eingabe wartet, bis der Start fertig ist (sonst zerreisst der Prompt den Ladebalken). */
 +    public static void awaitStartup() {
 +        if (VERBOSE) {
@@ -314,23 +509,23 @@ index 000000000..4653472cb
 +
 +    /** Nach "Done": Balken auf 100 %, dann Zusammenfassung, was geladen wurde. */
 +    public static void ready(int port) {
-+        progress(1.0, "Bereit");
++        progress(1.0, t("progress.ready"));
 +        double secs = uptimeSeconds();
 +        Runtime rt = Runtime.getRuntime();
 +
 +        List<String> lines = new ArrayList<>();
-+        lines.add(String.format(Locale.GERMANY, "%s %s ist bereit  -  gestartet in %.1f s", Tachyon.NAME.toUpperCase(Locale.ROOT), Tachyon.MC_VERSION, secs));
++        lines.add(t("summary.title", Tachyon.NAME.toUpperCase(Locale.ROOT), Tachyon.MC_VERSION, secs));
 +        lines.add("");
-+        lines.add("Port        " + port + SEP + Bukkit.getMaxPlayers() + " Slots" + SEP + (Bukkit.getOnlineMode() ? "Online-Modus" : "Offline-Modus")
-+                + SEP + "Whitelist " + (Bukkit.hasWhitelist() ? "an" : "aus"));
++        lines.add(label("summary.port") + port + SEP + t("summary.slots", Bukkit.getMaxPlayers()) + SEP + t(Bukkit.getOnlineMode() ? "summary.online" : "summary.offline")
++                + SEP + t(Bukkit.hasWhitelist() ? "summary.whitelist.on" : "summary.whitelist.off"));
 +        StringJoiner worlds = new StringJoiner(", ");
 +        for (World w : Bukkit.getWorlds()) {
 +            worlds.add(w.getName());
 +        }
-+        lines.add("Welten      " + worlds);
++        lines.add(label("summary.worlds") + worlds);
 +        Plugin[] plugins = Bukkit.getPluginManager().getPlugins();
 +        if (plugins.length == 0) {
-+            lines.add("Plugins     keine (World-Manager ist eingebaut: /wm)");
++            lines.add(label("summary.plugins") + t("summary.plugins.none"));
 +        } else {
 +            StringJoiner pl = new StringJoiner(", ");
 +            int disabled = 0;
@@ -341,18 +536,17 @@ index 000000000..4653472cb
 +                    disabled++;
 +                }
 +            }
-+            lines.add("Plugins     " + (plugins.length - disabled) + " aktiv" + (disabled > 0 ? ", " + disabled + " FEHLGESCHLAGEN" : ""));
++            lines.add(label("summary.plugins") + t("summary.plugins.active", plugins.length - disabled) + (disabled > 0 ? t("summary.plugins.failed", disabled) : ""));
 +            for (String chunk : wrap(pl.toString(), 70)) {
 +                lines.add("            " + chunk);
 +            }
 +        }
-+        lines.add("System      Java " + Runtime.version().feature() + SEP + rt.availableProcessors() + " Threads" + SEP
-+                + formatMb(rt.totalMemory() - rt.freeMemory()) + " von " + formatMb(rt.maxMemory()) + " RAM belegt");
-+        String problems = (warnings == 0 && errors == 0) ? "keine Warnungen oder Fehler"
-+                : warnings + " Warnung(en), " + errors + " Fehler (Details in logs/latest.log)";
-+        lines.add("Start       " + problems);
++        lines.add(label("summary.system") + "Java " + Runtime.version().feature() + SEP + rt.availableProcessors() + " " + t("console.threads") + SEP
++                + t("summary.ram", formatMb(rt.totalMemory() - rt.freeMemory()), formatMb(rt.maxMemory())));
++        String problems = (warnings == 0 && errors == 0) ? t("summary.start.ok") : t("summary.start.problems", warnings, errors);
++        lines.add(label("summary.start") + problems);
 +        lines.add("");
-+        lines.add("Befehle     /wm  (Welten)" + SEP + "/tps" + SEP + "/stop");
++        lines.add(label("summary.commands") + t("summary.commands.list").replace("  \u00B7  ", SEP));
 +
 +        int w = 0;
 +        for (String l : lines) {
@@ -393,10 +587,16 @@ index 000000000..4653472cb
 +        }
 +        String label = l.substring(0, 12);
 +        String rest = l.substring(12);
-+        if (rest.contains("FEHLGESCHLAGEN") || rest.contains(" Fehler (")) {
++        if (rest.contains("FEHLGESCHLAGEN") || rest.contains("FAILED") || rest.contains("logs/latest.log")) {
 +            rest = YELLOW + rest + RESET;
 +        }
 +        return DIM + label + RESET + rest;
++    }
++
++    /** Beschriftung links in der Zusammenfassung, auf 12 Zeichen aufgefuellt. */
++    private static String label(String key) {
++        String l = t(key);
++        return l + " ".repeat(Math.max(1, 12 - l.length()));
 +    }
 +
 +    private static List<String> wrap(String text, int width) {
@@ -439,7 +639,7 @@ index 000000000..4653472cb
 +        String thread = p[2];
 +        String msg = p[3];
 +        if (!color) {
-+            return "[" + time + "] [" + thread + "/" + level + "]: " + msg; // klassisches Format (Pipes, Panels)
++            return "[" + time + "] [" + thread + "/" + level + "]: " + msg.replace('✔', '+'); // klassisches Format (Pipes, Panels)
 +        }
 +        StringBuilder sb = new StringBuilder(msg.length() + 48);
 +        sb.append(DIM).append(time).append(RESET).append(' ');
@@ -476,6 +676,9 @@ index 000000000..4653472cb
 +        if (msg.contains(" issued server command: ")) {
 +            return MAGENTA + msg;
 +        }
++        if (msg.startsWith("[WorldManager] ✔")) {
++            return GREEN + BOLD + "✔" + RESET + GREEN + msg.substring("[WorldManager] ✔".length());
++        }
 +        if (msg.startsWith("[WorldManager]") || msg.startsWith("[Tachyon]")) {
 +            int close = msg.indexOf(']');
 +            return CYAN + BOLD + msg.substring(0, close + 1) + RESET + CYAN + msg.substring(close + 1);
@@ -484,6 +687,254 @@ index 000000000..4653472cb
 +            return BLUE + msg; // Chat
 +        }
 +        return msg;
++    }
++}
+diff --git a/src/main/java/dev/tachyon/i18n/Lang.java b/src/main/java/dev/tachyon/i18n/Lang.java
+new file mode 100644
+index 000000000..03718385d
+--- /dev/null
++++ b/src/main/java/dev/tachyon/i18n/Lang.java
+@@ -0,0 +1,136 @@
++package dev.tachyon.i18n;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.InputStreamReader;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.Paths;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Locale;
++import java.util.Properties;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
++/**
++ * Sprachen von Tachyon (Deutsch / Englisch).
++ * <p>
++ * Die Sprache steht in tachyon.yml ("language: de" oder "language: en"). Fehlt sie, fragt Tachyon
++ * beim ersten Start in der Konsole nach. Ueberschreiben: -Dtachyon.language=de|en.
++ */
++public final class Lang {
++
++    public static final Path CONFIG = Paths.get("tachyon.yml");
++    private static final Pattern LANGUAGE_LINE = Pattern.compile("(?m)^language:\\s*['\"]?(de|en)['\"]?\\s*$");
++
++    private static volatile String code;
++    private static Properties messages = new Properties();
++    private static Properties fallback = new Properties();
++
++    private Lang() {
++    }
++
++    /** Liest die Sprache (ohne nachzufragen). Wird bei Bedarf automatisch aufgerufen. */
++    private static synchronized void ensureLoaded() {
++        if (code == null) {
++            String configured = configuredLanguage();
++            load(configured != null ? configured : systemDefault());
++        }
++    }
++
++    /** @return true, wenn noch keine Sprache festgelegt wurde (erster Start) */
++    public static boolean needsChoice() {
++        return configuredLanguage() == null;
++    }
++
++    /** @return "de" oder "en" passend zur Systemsprache */
++    public static String systemDefault() {
++        return "de".equals(Locale.getDefault().getLanguage()) ? "de" : "en";
++    }
++
++    private static String configuredLanguage() {
++        String prop = System.getProperty("tachyon.language");
++        if (prop != null && (prop.equalsIgnoreCase("de") || prop.equalsIgnoreCase("en"))) {
++            return prop.toLowerCase(Locale.ROOT);
++        }
++        try {
++            if (Files.isRegularFile(CONFIG)) {
++                Matcher m = LANGUAGE_LINE.matcher(Files.readString(CONFIG, StandardCharsets.UTF_8));
++                if (m.find()) {
++                    return m.group(1);
++                }
++            }
++        } catch (IOException ignored) {
++            // dann eben Systemsprache
++        }
++        return null;
++    }
++
++    /** Setzt die Sprache und speichert sie in tachyon.yml. */
++    public static synchronized void choose(String language) {
++        load(language);
++        try {
++            List<String> lines = Files.isRegularFile(CONFIG) ? new ArrayList<>(Files.readAllLines(CONFIG, StandardCharsets.UTF_8)) : new ArrayList<>();
++            lines.removeIf(l -> l.startsWith("language:"));
++            int insert = 0;
++            while (insert < lines.size() && lines.get(insert).startsWith("#")) {
++                insert++; // nach dem Kopfkommentar einfuegen
++            }
++            lines.add(insert, "language: " + language);
++            Files.write(CONFIG, lines, StandardCharsets.UTF_8);
++        } catch (IOException ignored) {
++            // nicht schlimm: dann wird beim naechsten Start erneut gefragt
++        }
++    }
++
++    private static void load(String language) {
++        code = "de".equals(language) ? "de" : "en";
++        messages = read(code);
++        fallback = "en".equals(code) ? messages : read("en");
++    }
++
++    private static Properties read(String language) {
++        Properties p = new Properties();
++        try (InputStream in = Lang.class.getResourceAsStream("/tachyon/lang/" + language + ".properties")) {
++            if (in != null) {
++                p.load(new InputStreamReader(in, StandardCharsets.UTF_8));
++            }
++        } catch (IOException ignored) {
++            // leere Texte -> Schluessel wird angezeigt
++        }
++        return p;
++    }
++
++    /** @return aktuelle Sprache ("de" oder "en") */
++    public static String code() {
++        ensureLoaded();
++        return code;
++    }
++
++    /** @return true bei Deutsch */
++    public static boolean german() {
++        return "de".equals(code());
++    }
++
++    /**
++     * Uebersetzter Text. Platzhalter wie in String.format (%s, %d ...).
++     *
++     * @param key Schluessel aus tachyon/lang/*.properties
++     * @param args Werte fuer die Platzhalter
++     * @return Text in der eingestellten Sprache
++     */
++    public static String t(String key, Object... args) {
++        ensureLoaded();
++        String text = messages.getProperty(key, fallback.getProperty(key, key));
++        if (args.length == 0) {
++            return text;
++        }
++        try {
++            return String.format(german() ? Locale.GERMANY : Locale.ROOT, text, args);
++        } catch (RuntimeException e) {
++            return text;
++        }
++    }
++}
+diff --git a/src/main/java/dev/tachyon/text/Style.java b/src/main/java/dev/tachyon/text/Style.java
+new file mode 100644
+index 000000000..13aafc5eb
+--- /dev/null
++++ b/src/main/java/dev/tachyon/text/Style.java
+@@ -0,0 +1,100 @@
++package dev.tachyon.text;
++
++import net.md_5.bungee.api.ChatColor;
++import org.bukkit.command.CommandSender;
++import org.bukkit.entity.Player;
++
++/**
++ * Einheitlicher Chat-Look von Tachyon: Farbverlauf-Praefix, Hex-Farben, Trennlinien und Balken.
++ * Spieler bekommen Hex-Farben, die Konsole die naechstliegenden Standardfarben.
++ */
++public final class Style {
++
++    public static final String C_ACCENT = "#7ee0c3";
++    public static final String C_ACCENT2 = "#c9a7ff";
++    public static final String C_TEXT = "#e8e9f3";
++    public static final String C_MUTED = "#8a8fa3";
++    public static final String C_GOOD = "#7ee08a";
++    public static final String C_WARN = "#ffd479";
++    public static final String C_BAD = "#ff6b8b";
++
++    private Style() {
++    }
++
++    /** Farbe fuer einen Empfaenger: Hex fuer Spieler, Standardfarbe fuer die Konsole. */
++    public static String col(CommandSender to, String hex) {
++        if (to instanceof Player) {
++            return ChatColor.of(hex).toString();
++        }
++        return switch (hex) {
++            case C_ACCENT -> ChatColor.AQUA.toString();
++            case C_ACCENT2 -> ChatColor.LIGHT_PURPLE.toString();
++            case C_TEXT -> ChatColor.WHITE.toString();
++            case C_MUTED -> ChatColor.GRAY.toString();
++            case C_GOOD -> ChatColor.GREEN.toString();
++            case C_WARN -> ChatColor.YELLOW.toString();
++            case C_BAD -> ChatColor.RED.toString();
++            default -> ChatColor.WHITE.toString();
++        };
++    }
++
++    /** Text mit Farbverlauf (nur fuer Spieler, Konsole bekommt eine Farbe). */
++    public static String gradient(CommandSender to, String text, String fromHex, String toHex) {
++        if (!(to instanceof Player)) {
++            return col(to, fromHex) + ChatColor.BOLD + text + ChatColor.RESET;
++        }
++        java.awt.Color a = java.awt.Color.decode(fromHex);
++        java.awt.Color b = java.awt.Color.decode(toHex);
++        StringBuilder sb = new StringBuilder();
++        int n = Math.max(1, text.length() - 1);
++        for (int i = 0; i < text.length(); i++) {
++            float f = i / (float) n;
++            int r = Math.round(a.getRed() + (b.getRed() - a.getRed()) * f);
++            int g = Math.round(a.getGreen() + (b.getGreen() - a.getGreen()) * f);
++            int bl = Math.round(a.getBlue() + (b.getBlue() - a.getBlue()) * f);
++            sb.append(ChatColor.of(new java.awt.Color(r, g, bl))).append(ChatColor.BOLD).append(text.charAt(i));
++        }
++        return sb.append(ChatColor.RESET).toString();
++    }
++
++    /** "Tachyon » " in Farbverlauf. */
++    public static String prefix(CommandSender to) {
++        return gradient(to, "Tachyon", C_ACCENT, C_ACCENT2) + col(to, C_MUTED) + " » " + col(to, C_TEXT);
++    }
++
++    /** Durchgestrichene Trennlinie. */
++    public static String line(CommandSender to) {
++        return col(to, C_MUTED) + ChatColor.STRIKETHROUGH + " ".repeat(to instanceof Player ? 52 : 40) + ChatColor.RESET;
++    }
++
++    /** Balken aus Kaestchen, z.B. fuer TPS oder RAM. */
++    public static String bar(CommandSender to, double fraction, int width, String fillHex) {
++        double f = Math.max(0, Math.min(1, fraction));
++        int filled = (int) Math.round(f * width);
++        String full = to instanceof Player ? "■" : "#";
++        String empty = to instanceof Player ? "■" : "-";
++        return col(to, fillHex) + full.repeat(filled) + ChatColor.DARK_GRAY + empty.repeat(width - filled) + ChatColor.RESET;
++    }
++
++    /** Gruen / Gelb / Rot fuer TPS. */
++    public static String tpsColor(double tps) {
++        return tps >= 19.5 ? C_GOOD : tps >= 17 ? C_WARN : C_BAD;
++    }
++
++    /** Gruen / Gelb / Rot fuer Millisekunden pro Tick (50 ms = Limit). */
++    public static String msptColor(double mspt) {
++        return mspt < 30 ? C_GOOD : mspt < 45 ? C_WARN : C_BAD;
++    }
++
++    public static void ok(CommandSender to, String msg) {
++        to.sendMessage(prefix(to) + col(to, C_GOOD) + msg);
++    }
++
++    public static void err(CommandSender to, String msg) {
++        to.sendMessage(prefix(to) + col(to, C_BAD) + msg);
++    }
++
++    public static void info(CommandSender to, String msg) {
++        to.sendMessage(prefix(to) + col(to, C_TEXT) + msg);
 +    }
 +}
 diff --git a/src/main/java/dev/tachyon/world/VoidGenerator.java b/src/main/java/dev/tachyon/world/VoidGenerator.java
@@ -539,10 +990,10 @@ index 000000000..052d7bf9b
 +}
 diff --git a/src/main/java/dev/tachyon/world/WorldManager.java b/src/main/java/dev/tachyon/world/WorldManager.java
 new file mode 100644
-index 000000000..8e6954458
+index 000000000..c3de9d5bc
 --- /dev/null
 +++ b/src/main/java/dev/tachyon/world/WorldManager.java
-@@ -0,0 +1,814 @@
+@@ -0,0 +1,981 @@
 +package dev.tachyon.world;
 +
 +import java.io.File;
@@ -585,6 +1036,13 @@ index 000000000..8e6954458
 +import org.bukkit.configuration.file.YamlConfiguration;
 +import org.bukkit.craftbukkit.CraftWorld;
 +import org.bukkit.entity.Player;
++import dev.tachyon.api.TachyonAPI;
++import dev.tachyon.api.TachyonWorldReadyEvent;
++import dev.tachyon.api.TachyonWorlds;
++import dev.tachyon.api.WorldOptions;
++import java.util.concurrent.CompletableFuture;
++import static dev.tachyon.i18n.Lang.t;
++import dev.tachyon.console.TachyonConsole;
 +
 +/**
 + * Tachyon World-Manager.
@@ -625,6 +1083,7 @@ index 000000000..8e6954458
 +    private boolean started;
 +    private int ticks;
 +    private int trainingTicks;
++    private int liveTicks;
 +
 +    // Einstellungen
 +    private boolean fastForPlugins;
@@ -647,6 +1106,7 @@ index 000000000..8e6954458
 +    public static void init(File configFile) {
 +        if (instance == null) {
 +            instance = new WorldManager(configFile);
++            TachyonAPI.setWorlds(instance.new Api()); // Tachyon-API fuer Plugins
 +        }
 +    }
 +
@@ -707,19 +1167,7 @@ index 000000000..8e6954458
 +
 +    public void reloadConfig() {
 +        config = YamlConfiguration.loadConfiguration(configFile);
-+        config.options().setHeader(List.of(
-+                "Tachyon Konfiguration",
-+                "",
-+                "startup.fast-start:",
-+                "  true = der Server wartet beim Start nicht auf die Spawnsuche/Spawn-Chunks, sondern erledigt das",
-+                "  in den ersten Sekunden nach 'Done' im Hintergrund. Spieler finden trotzdem einen sicheren Spawn.",
-+                "world-manager.fast-world-creation-for-plugins:",
-+                "  true = auch Welten, die Plugins (z.B. Multiverse) erstellen, werden ohne Server-Haenger angelegt.",
-+                "  Der Spawnpunkt wird dann kurz nach dem Erstellen im Hintergrund gesucht.",
-+                "world-manager.spawn-preload-radius: Chunks um den Spawn, die vor 'bereit' geladen werden.",
-+                "world-manager.autoload-interval-ticks: Abstand zwischen zwei Welten beim automatischen Laden nach dem Start.",
-+                "world-manager.pregen-parallel-chunks: so viele Chunks generiert /wm pregen gleichzeitig (pausiert automatisch bei Lag).",
-+                "worlds: wird vom /wm Befehl verwaltet."));
++        config.options().setHeader(List.of(t("wm.config.header").split("\n")));
 +        config.addDefault("startup.fast-start", true);
 +        config.addDefault("world-manager.fast-world-creation-for-plugins", false);
 +        config.addDefault("world-manager.spawn-preload-radius", 2);
@@ -738,7 +1186,7 @@ index 000000000..8e6954458
 +        try {
 +            config.save(configFile);
 +        } catch (IOException e) {
-+            logger.log(Level.WARNING, "Konnte " + configFile + " nicht speichern", e);
++            logger.log(Level.WARNING, "tachyon.yml: " + e.getMessage(), e);
 +        }
 +    }
 +
@@ -801,13 +1249,13 @@ index 000000000..8e6954458
 +                }
 +            }
 +            if (!autoloadQueue.isEmpty()) {
-+                logger.info("[WorldManager] Lade " + autoloadQueue.size() + " Welt(en) im Hintergrund...");
++                logger.info("[WorldManager] " + t("wm.log.autoload", autoloadQueue.size()));
 +            }
 +            // Spawnsuchen fortsetzen, die beim letzten Mal durch einen Stopp unterbrochen wurden
 +            for (String name : config.getStringList("internal.pending-spawn")) {
 +                World w = Bukkit.getWorld(name);
 +                if (w != null && !provisionalSpawn.contains(((CraftWorld) w).getHandle())) {
-+                    logger.info("[WorldManager] Setze unterbrochene Spawnsuche fuer '" + name + "' fort...");
++                    logger.info("[WorldManager] " + t("wm.log.resume_spawn", name));
 +                    resolveSpawn(w, null);
 +                }
 +            }
@@ -819,17 +1267,20 @@ index 000000000..8e6954458
 +            try {
 +                task.run();
 +            } catch (Throwable t) {
-+                logger.log(Level.SEVERE, "[WorldManager] Fehler in Hintergrundaufgabe", t);
++                logger.log(Level.SEVERE, "[WorldManager] background task failed", t);
 +            }
 +        }
 +
 +        if (pregen != null) {
 +            pregen.tick(slowTick);
 +        }
++        if (++liveTicks % 5 == 0) {
++            updateLiveBars();
++        }
 +
 +        // AOT-Trainingslauf (start.bat): kurz laufen lassen, damit Java den Start-Cache aufzeichnen kann, dann beenden.
 +        if (AOT_TRAINING && ++trainingTicks == 200) {
-+            logger.info("[Tachyon] AOT-Training abgeschlossen - Server wird beendet, Java schreibt jetzt den Start-Cache...");
++            logger.info("[Tachyon] " + t("wm.log.training_done"));
 +            Bukkit.shutdown();
 +        }
 +
@@ -838,12 +1289,45 @@ index 000000000..8e6954458
 +            WorldSpec spec = storedSpec(name);
 +            if (spec != null && Bukkit.getWorld(name) == null) {
 +                if (!worldFolder(name).isDirectory()) {
-+                    logger.warning("[WorldManager] Ordner fuer Welt '" + name + "' fehlt - uebersprungen.");
++                    logger.warning("[WorldManager] " + t("wm.log.folder_missing", name));
 +                } else {
-+                    loadOrCreate(spec, w -> logger.info("[WorldManager] Welt '" + name + "' bereit."),
++                    loadOrCreate(spec, true, w -> { },
 +                            err -> logger.warning("[WorldManager] " + err));
 +                }
 +            }
++        }
++    }
++
++    /** Live-Balken fuer alle Welten, die gerade geladen/erstellt werden (nur echtes Terminal). */
++    private void updateLiveBars() {
++        if (!TachyonConsole.liveSupported()) {
++            return;
++        }
++        for (LoadState st : states.values()) {
++            if (st.ready || st.world == null) {
++                continue;
++            }
++            double fraction;
++            String phase;
++            if (st.searching || st.preloadCenter == null) {
++                fraction = 0.05 + 0.25 * Math.min(1.0, st.candidate / 8.0);
++                phase = t("live.phase.search");
++            } else {
++                ServerLevel level = ((CraftWorld) st.world).getHandle();
++                int loaded = 0;
++                int total = 0;
++                for (int dx = -preloadRadius; dx <= preloadRadius; dx++) {
++                    for (int dz = -preloadRadius; dz <= preloadRadius; dz++) {
++                        total++;
++                        if (level.getChunkSource().getChunkNow(st.preloadCenter.x() + dx, st.preloadCenter.z() + dz) != null) {
++                            loaded++;
++                        }
++                    }
++                }
++                fraction = 0.3 + 0.7 * loaded / Math.max(1, total);
++                phase = t("live.phase.spawn");
++            }
++            TachyonConsole.live("world:" + st.world.getName(), fraction, t("live.world", st.world.getName(), phase), (System.nanoTime() - st.startNanos) / 1e9);
 +        }
 +    }
 +
@@ -866,9 +1350,9 @@ index 000000000..8e6954458
 +     * Laedt oder erstellt eine Welt ohne den Main-Thread zu blockieren.
 +     * onReady wird auf dem Main-Thread aufgerufen, sobald der Spawnbereich generiert ist.
 +     */
-+    public void loadOrCreate(WorldSpec spec, Consumer<World> onReady, Consumer<String> onError) {
++    public void loadOrCreate(WorldSpec spec, boolean autoload, Consumer<World> onReady, Consumer<String> onError) {
 +        if (!VALID_NAME.matcher(spec.name()).matches()) {
-+            onError.accept("Ungueltiger Weltname. Erlaubt: A-Z, a-z, 0-9, _ und - (max. 64 Zeichen).");
++            onError.accept(t("wm.err.invalid_name"));
 +            return;
 +        }
 +        String key = spec.name().toLowerCase(Locale.ROOT);
@@ -890,24 +1374,26 @@ index 000000000..8e6954458
 +        try {
 +            world = Bukkit.createWorld(spec.toCreator());
 +        } catch (Throwable t) {
-+            logger.log(Level.SEVERE, "[WorldManager] Welt '" + spec.name() + "' konnte nicht geladen werden", t);
-+            onError.accept("Welt '" + spec.name() + "' konnte nicht geladen werden: " + t.getMessage());
++            logger.log(Level.SEVERE, "[WorldManager] " + t("wm.err.load_failed", spec.name(), String.valueOf(t.getMessage())), t);
++            onError.accept(t("wm.err.load_failed", spec.name(), String.valueOf(t.getMessage())));
 +            return;
 +        } finally {
 +            managerDepth--;
 +        }
 +        if (world == null) {
-+            onError.accept("Welt '" + spec.name() + "' konnte nicht geladen werden.");
++            onError.accept(t("wm.err.load_failed", spec.name(), "-"));
 +            return;
 +        }
 +        double ms = (System.nanoTime() - start) / 1_000_000.0;
-+        logger.info(String.format(Locale.ROOT, "[WorldManager] Welt '%s' %s in %.1f ms (Main-Thread). Spawnbereich wird im Hintergrund generiert...",
-+                world.getName(), isNew ? "erstellt" : "geladen", ms));
 +
 +        LoadState st = new LoadState();
++        st.created = isNew;
++        st.world = world;
++        st.startNanos = start;
++        st.mainThreadMs = ms;
 +        st.waiters.add(onReady);
 +        states.put(key, st);
-+        storeSpec(spec, true);
++        storeSpec(spec, autoload);
 +
 +        ServerLevel level = ((CraftWorld) world).getHandle();
 +        String resolvedKey = "worlds." + spec.name() + ".spawn-resolved";
@@ -934,7 +1420,13 @@ index 000000000..8e6954458
 +    // ------------------------------------------------------------------ Asynchrone Spawnsuche
 +
 +    private void resolveSpawn(World world, LoadState st) {
-+        final LoadState state = st != null ? st : states.computeIfAbsent(world.getName().toLowerCase(Locale.ROOT), k -> new LoadState());
++        final LoadState state = st != null ? st : states.computeIfAbsent(world.getName().toLowerCase(Locale.ROOT), k -> {
++            LoadState n = new LoadState();
++            n.quiet = true; // Hauptwelten beim Start / Plugin-Welten: Live-Balken ja, aber keine eigene Logzeile
++            return n;
++        });
++        state.world = world;
++        state.searching = true;
 +        ServerLevel level = ((CraftWorld) world).getHandle();
 +        Location provisional = world.getSpawnLocation();
 +        ChunkPos origin = new ChunkPos(provisional.getBlockX() >> 4, provisional.getBlockZ() >> 4);
@@ -954,6 +1446,7 @@ index 000000000..8e6954458
 +            return;
 +        }
 +        ChunkPos pos = candidates.get(index);
++        st.candidate = index;
 +        level.getChunkSource().addTicketAndLoadWithRadius(TicketType.TACHYON_WORLD_PRELOAD, pos, 0)
 +                .whenComplete((result, error) -> mainQueue.add(() -> {
 +                    if (Bukkit.getWorld(world.getUID()) == null) {
@@ -993,19 +1486,27 @@ index 000000000..8e6954458
 +        ServerLevel level = ((CraftWorld) world).getHandle();
 +        Location spawn = world.getSpawnLocation();
 +        ChunkPos center = new ChunkPos(spawn.getBlockX() >> 4, spawn.getBlockZ() >> 4);
-+        long start = System.nanoTime();
++        st.world = world;
++        st.searching = false;
++        st.preloadCenter = center;
 +        level.getChunkSource().addTicketAndLoadWithRadius(TicketType.TACHYON_WORLD_PRELOAD, center, preloadRadius)
 +                .whenComplete((result, error) -> mainQueue.add(() -> {
 +                    st.ready = true;
-+                    logger.info(String.format(Locale.ROOT, "[WorldManager] Welt '%s' bereit (Spawnbereich in %.1f s generiert, Server lief normal weiter).",
-+                            world.getName(), (System.nanoTime() - start) / 1e9));
++                    TachyonConsole.liveDone("world:" + world.getName());
++                    if (!st.quiet) {
++                        logger.info("[WorldManager] \u2714 " + t("wm.log.ready", world.getName(), t(st.created ? "wm.word.created" : "wm.word.loaded"),
++                                st.mainThreadMs, (System.nanoTime() - st.startNanos) / 1e9));
++                    }
++                    if (Bukkit.getWorld(world.getUID()) != null) {
++                        Bukkit.getPluginManager().callEvent(new TachyonWorldReadyEvent(world, st.created));
++                    }
 +                    List<Consumer<World>> waiters = new ArrayList<>(st.waiters);
 +                    st.waiters.clear();
 +                    for (Consumer<World> w : waiters) {
 +                        try {
 +                            w.accept(world);
 +                        } catch (Throwable t) {
-+                            logger.log(Level.WARNING, "[WorldManager] Fehler im Bereit-Callback", t);
++                            logger.log(Level.WARNING, "[WorldManager] ready callback failed", t);
 +                        }
 +                    }
 +                }));
@@ -1044,18 +1545,18 @@ index 000000000..8e6954458
 +    public String unload(String name, boolean save) {
 +        World world = Bukkit.getWorld(name);
 +        if (world == null) {
-+            return "Welt '" + name + "' ist nicht geladen.";
++            return t("wm.err.not_loaded", name);
 +        }
 +        World main = Bukkit.getWorlds().get(0);
 +        if (world.equals(main)) {
-+            return "Die Hauptwelt kann nicht entladen werden.";
++            return t("wm.err.main_world");
 +        }
 +        for (Player p : world.getPlayers()) {
 +            p.teleport(safeSpawn(main));
-+            p.sendMessage("§eDie Welt '" + name + "' wird entladen, du wurdest zum Spawn gebracht.");
++            p.sendMessage("\u00A7e" + t("wm.msg.unload_teleport", name));
 +        }
 +        if (!Bukkit.unloadWorld(world, save)) {
-+            return "Welt '" + name + "' konnte nicht entladen werden (ein Plugin hat es verhindert?).";
++            return t("wm.err.unload_failed", name);
 +        }
 +        states.remove(name.toLowerCase(Locale.ROOT));
 +        return null;
@@ -1068,7 +1569,7 @@ index 000000000..8e6954458
 +
 +    public void delete(String name, Consumer<String> onDone, Consumer<String> onError) {
 +        if (isProtected(name)) {
-+            onError.accept("Die Standardwelten koennen nicht geloescht werden.");
++            onError.accept(t("wm.err.protected"));
 +            return;
 +        }
 +        if (Bukkit.getWorld(name) != null) {
@@ -1082,34 +1583,34 @@ index 000000000..8e6954458
 +        config.set("worlds." + name, null);
 +        saveConfig();
 +        if (!folder.exists()) {
-+            onDone.accept("Welt '" + name + "' aus der Verwaltung entfernt (kein Ordner vorhanden).");
++            onDone.accept(t("wm.msg.removed", name));
 +            return;
 +        }
 +        io.execute(() -> {
 +            try {
 +                deleteRecursive(folder.toPath());
-+                mainQueue.add(() -> onDone.accept("Welt '" + name + "' wurde geloescht."));
++                mainQueue.add(() -> onDone.accept(t("wm.msg.deleted", name)));
 +            } catch (IOException e) {
-+                mainQueue.add(() -> onError.accept("Loeschen fehlgeschlagen: " + e.getMessage()));
++                mainQueue.add(() -> onError.accept(t("wm.err.delete_failed", e.getMessage())));
 +            }
 +        });
 +    }
 +
 +    public void cloneWorld(String source, String target, Consumer<World> onReady, Consumer<String> onError) {
 +        if (!VALID_NAME.matcher(target).matches()) {
-+            onError.accept("Ungueltiger Zielname.");
++            onError.accept(t("wm.err.invalid_target"));
 +            return;
 +        }
 +        if (!worldExistsOnDisk(source)) {
-+            onError.accept("Quellwelt '" + source + "' existiert nicht.");
++            onError.accept(t("wm.err.source_missing", source));
 +            return;
 +        }
 +        if (Bukkit.getWorld(source) != null) {
-+            onError.accept("Quellwelt '" + source + "' ist geladen - bitte zuerst '/wm unload " + source + "'.");
++            onError.accept(t("wm.err.source_loaded", source, source));
 +            return;
 +        }
 +        if (worldFolder(target).exists()) {
-+            onError.accept("Zielordner '" + target + "' existiert bereits.");
++            onError.accept(t("wm.err.target_exists", target));
 +            return;
 +        }
 +        WorldSpec srcSpec = storedSpec(source);
@@ -1121,10 +1622,10 @@ index 000000000..8e6954458
 +                copyRecursive(from, to);
 +                mainQueue.add(() -> {
 +                    config.set("worlds." + target + ".spawn-resolved", true);
-+                    loadOrCreate(spec, onReady, onError);
++                    loadOrCreate(spec, true, onReady, onError);
 +                });
 +            } catch (IOException e) {
-+                mainQueue.add(() -> onError.accept("Kopieren fehlgeschlagen: " + e.getMessage()));
++                mainQueue.add(() -> onError.accept(t("wm.err.copy_failed", e.getMessage())));
 +            }
 +        });
 +    }
@@ -1185,12 +1686,12 @@ index 000000000..8e6954458
 +    /** @return Fehlermeldung oder null */
 +    public String startPregen(World world, int radiusBlocks, Consumer<String> progress) {
 +        if (pregen != null) {
-+            return "Es laeuft bereits eine Vorgenerierung fuer '" + pregen.world.getName() + "'. Stoppen mit /wm pregen stop";
++            return t("wm.pregen.running", pregen.world.getName());
 +        }
 +        int radius = Math.max(1, radiusBlocks >> 4);
 +        Location c = world.getSpawnLocation();
 +        pregen = new PregenTask(world, new ChunkPos(c.getBlockX() >> 4, c.getBlockZ() >> 4), radius, progress);
-+        logger.info("[WorldManager] Vorgenerierung gestartet: '" + world.getName() + "', Radius " + radiusBlocks + " Bloecke (" + pregen.total + " Chunks).");
++        logger.info("[WorldManager] " + t("wm.pregen.started.log", world.getName(), radiusBlocks, pregen.total));
 +        return null;
 +    }
 +
@@ -1200,6 +1701,7 @@ index 000000000..8e6954458
 +        }
 +        String status = pregen.status();
 +        pregen.cancelled = true;
++        TachyonConsole.liveDone("pregen");
 +        pregen = null;
 +        return status;
 +    }
@@ -1222,6 +1724,7 @@ index 000000000..8e6954458
 +        int inFlight;
 +        long done;
 +        int lastReportedPercent = -1;
++        int liveTick;
 +        long pausedTicks;
 +        boolean cancelled;
 +
@@ -1260,9 +1763,17 @@ index 000000000..8e6954458
 +                return;
 +            }
 +            if (Bukkit.getWorld(world.getUID()) == null) {
-+                progress.accept("Vorgenerierung abgebrochen: Welt '" + world.getName() + "' wurde entladen.");
++                progress.accept(t("wm.pregen.aborted", world.getName()));
++                TachyonConsole.liveDone("pregen");
 +                pregen = null;
 +                return;
++            }
++            if (++liveTick % 5 == 0) {
++                double secs = (System.nanoTime() - startNanos) / 1e9;
++                double rate = secs > 0 ? done / secs : 0;
++                long remaining = rate > 0 ? (long) ((total - done) / rate) : -1;
++                TachyonConsole.live("pregen", done / (double) total, t("live.pregen", world.getName(), String.format(Locale.ROOT, "%.0f", rate),
++                        remaining < 0 ? "?" : t("wm.pregen.eta", remaining / 60, remaining % 60)), secs);
 +            }
 +            if (slowTick) {
 +                pausedTicks++;
@@ -1288,8 +1799,9 @@ index 000000000..8e6954458
 +            int percent = (int) (done * 100 / total);
 +            if (done >= total) {
 +                double secs = (System.nanoTime() - startNanos) / 1e9;
-+                String msg = String.format(Locale.ROOT, "Vorgenerierung von '%s' fertig: %d Chunks in %.0f s.", world.getName(), total, secs);
-+                logger.info("[WorldManager] " + msg);
++                String msg = t("wm.pregen.done", world.getName(), total, secs);
++                TachyonConsole.liveDone("pregen");
++                logger.info("[WorldManager] \u2714 " + msg);
 +                progress.accept(msg);
 +                pregen = null;
 +                return;
@@ -1297,7 +1809,9 @@ index 000000000..8e6954458
 +            if (percent / 5 != lastReportedPercent / 5) {
 +                lastReportedPercent = percent;
 +                String msg = status();
-+                logger.info("[WorldManager] " + msg);
++                if (!TachyonConsole.liveSupported()) {
++                    logger.info("[WorldManager] " + msg); // ohne Live-Balken (Panels) weiterhin alle 5 %
++                }
 +                progress.accept(msg);
 +            }
 +        }
@@ -1306,15 +1820,119 @@ index 000000000..8e6954458
 +            double secs = (System.nanoTime() - startNanos) / 1e9;
 +            double rate = secs > 0 ? done / secs : 0;
 +            long remaining = rate > 0 ? (long) ((total - done) / rate) : -1;
-+            return String.format(Locale.ROOT, "Pregen '%s': %d/%d Chunks (%d%%), %.0f Chunks/s, noch ca. %s%s",
-+                    world.getName(), done, total, done * 100 / total, rate,
-+                    remaining < 0 ? "?" : (remaining / 60) + " min " + (remaining % 60) + " s",
-+                    pausedTicks > 0 ? ", " + pausedTicks + " Ticks wegen Last pausiert" : "");
++            return t("wm.pregen.status", world.getName(), done, total, done * 100 / total, rate,
++                    remaining < 0 ? "?" : t("wm.pregen.eta", remaining / 60, remaining % 60),
++                    pausedTicks > 0 ? t("wm.pregen.paused", pausedTicks) : "");
++        }
++    }
++
++    /** Gespeicherte Einstellungen einer Welt, optional mit Umgebung aus einem Befehl ("normal", "nether", "end"). */
++    public WorldSpec specFor(String name, String envArg) {
++        WorldSpec stored = storedSpec(name);
++        if (stored != null && envArg == null) {
++            return stored;
++        }
++        World.Environment env = World.Environment.NORMAL;
++        if (envArg != null) {
++            switch (envArg.toLowerCase(Locale.ROOT)) {
++                case "nether" -> env = World.Environment.NETHER;
++                case "end", "the_end" -> env = World.Environment.THE_END;
++                default -> env = World.Environment.NORMAL;
++            }
++        }
++        return new WorldSpec(name, env, stored != null ? stored.type() : WorldSpec.Type.NORMAL, null, true);
++    }
++
++    // ------------------------------------------------------------------ Tachyon-API fuer Plugins
++
++    /** Implementierung von {@link TachyonWorlds}: duenne Schicht ueber dem World-Manager. */
++    private final class Api implements TachyonWorlds {
++
++        private CompletableFuture<World> future(java.util.function.BiConsumer<Consumer<World>, Consumer<String>> action) {
++            CompletableFuture<World> f = new CompletableFuture<>();
++            action.accept(f::complete, msg -> f.completeExceptionally(new IllegalStateException(msg)));
++            return f;
++        }
++
++        @Override
++        public CompletableFuture<World> createWorld(WorldOptions o) {
++            WorldSpec spec = new WorldSpec(o.name(), o.environment(), WorldSpec.Type.valueOf(o.type().name()), o.seed(), o.structures());
++            return future((ok, err) -> loadOrCreate(spec, o.autoload(), ok, err));
++        }
++
++        @Override
++        public CompletableFuture<World> loadWorld(String name) {
++            if (!worldExistsOnDisk(name) && Bukkit.getWorld(name) == null) {
++                return CompletableFuture.failedFuture(new IllegalStateException(t("cmd.tp.missing", name)));
++            }
++            return future((ok, err) -> loadOrCreate(specFor(name, null), true, ok, err));
++        }
++
++        @Override
++        public boolean unloadWorld(String name, boolean save) {
++            return unload(name, save) == null;
++        }
++
++        @Override
++        public CompletableFuture<Void> deleteWorld(String name) {
++            CompletableFuture<Void> f = new CompletableFuture<>();
++            delete(name, msg -> f.complete(null), msg -> f.completeExceptionally(new IllegalStateException(msg)));
++            return f;
++        }
++
++        @Override
++        public CompletableFuture<World> cloneWorld(String source, String target) {
++            return future((ok, err) -> WorldManager.this.cloneWorld(source, target, ok, err));
++        }
++
++        @Override
++        public boolean isReady(World world) {
++            return WorldManager.this.isReady(world);
++        }
++
++        @Override
++        public CompletableFuture<World> whenReady(World world) {
++            CompletableFuture<World> f = new CompletableFuture<>();
++            WorldManager.this.whenReady(world, f::complete);
++            return f;
++        }
++
++        @Override
++        public void teleportWhenReady(Player player, World world) {
++            WorldManager.this.teleportWhenReady(player, world);
++        }
++
++        @Override
++        public String startPregen(World world, int radiusBlocks) {
++            return WorldManager.this.startPregen(world, radiusBlocks, msg -> { });
++        }
++
++        @Override
++        public boolean stopPregen() {
++            return WorldManager.this.stopPregen() != null;
++        }
++
++        @Override
++        public Set<String> getManagedWorlds() {
++            return managedWorlds();
++        }
++
++        @Override
++        public void setAutoload(String name, boolean autoload) {
++            WorldManager.this.setAutoload(name, autoload);
 +        }
 +    }
 +
 +    private static final class LoadState {
 +        boolean ready;
++        boolean created;
++        boolean quiet;
++        boolean searching;
++        int candidate;
++        World world;
++        ChunkPos preloadCenter;
++        long startNanos = System.nanoTime();
++        double mainThreadMs;
 +        final List<Consumer<World>> waiters = new ArrayList<>();
 +    }
 +
@@ -1359,16 +1977,20 @@ index 000000000..8e6954458
 +}
 diff --git a/src/main/java/dev/tachyon/world/WorldManagerCommand.java b/src/main/java/dev/tachyon/world/WorldManagerCommand.java
 new file mode 100644
-index 000000000..da0ddd51f
+index 000000000..48025263c
 --- /dev/null
 +++ b/src/main/java/dev/tachyon/world/WorldManagerCommand.java
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,497 @@
 +package dev.tachyon.world;
 +
++import static dev.tachyon.i18n.Lang.t;
++
 +import java.util.ArrayList;
++import java.util.LinkedHashMap;
 +import java.util.LinkedHashSet;
 +import java.util.List;
 +import java.util.Locale;
++import java.util.Map;
 +import java.util.Set;
 +import org.bukkit.Bukkit;
 +import org.bukkit.ChatColor;
@@ -1377,20 +1999,92 @@ index 000000000..da0ddd51f
 +import org.bukkit.command.Command;
 +import org.bukkit.command.CommandSender;
 +import org.bukkit.entity.Player;
++import org.bukkit.permissions.Permission;
++import org.bukkit.permissions.PermissionDefault;
++import org.bukkit.plugin.PluginManager;
++import dev.tachyon.text.Style;
 +
 +/**
 + * /wm - eingebauter World-Manager von Tachyon.
++ *
++ * Jeder Unterbefehl hat eine eigene Berechtigung (tachyon.wm.&lt;befehl&gt;), standardmaessig nur fuer OPs.
++ * Mit einem Permission-Plugin (z.B. LuckPerms) lassen sie sich einzeln vergeben; tachyon.wm.* gibt alle.
 + */
 +public final class WorldManagerCommand extends Command {
 +
-+    private static final String P = ChatColor.DARK_AQUA + "[Tachyon] " + ChatColor.RESET;
-+    private static final List<String> SUB = List.of("create", "load", "unload", "delete", "clone", "tp", "list", "info", "setspawn", "autoload", "pregen", "reload");
++    public static final String PERM_PREFIX = "tachyon.wm.";
++    public static final String PERM_ALL = "tachyon.wm.*";
++    public static final String PERM_TP_OTHERS = "tachyon.wm.tp.others";
++
++    /** Unterbefehl -> Benutzung (fuer Hilfe und Fehlermeldungen). Reihenfolge = Reihenfolge in der Hilfe. */
++    private static final Map<String, String> SUB = new LinkedHashMap<>();
 +    private static final List<String> TYPES = List.of("normal", "flat", "amplified", "large_biomes", "void", "nether", "end");
 +
-+    public WorldManagerCommand(String name) {
-+        super(name, "Tachyon World-Manager", "/wm <create|load|unload|delete|clone|tp|list|info|setspawn|autoload>", List.of("worldmanager", "worlds"));
-+        setPermission("tachyon.command.wm");
++    static {
++        SUB.put("create", "create <name> [normal|flat|amplified|large_biomes|void|nether|end] [seed]");
++        SUB.put("load", "load <name> [normal|nether|end]");
++        SUB.put("unload", "unload <name> [nosave]");
++        SUB.put("delete", "delete <name> confirm");
++        SUB.put("clone", "clone <source> <target>");
++        SUB.put("tp", "tp <world> [player]");
++        SUB.put("list", "list");
++        SUB.put("info", "info <name>");
++        SUB.put("setspawn", "setspawn");
++        SUB.put("autoload", "autoload <name> <true|false>");
++        SUB.put("pregen", "pregen <world> <radius> | stop | status");
++        SUB.put("reload", "reload");
 +    }
++
++    public WorldManagerCommand(String name) {
++        super(name, t("cmd.desc"), "/wm <" + String.join("|", SUB.keySet()) + ">", List.of("worldmanager", "worlds"));
++        setPermission(PERM_PREFIX + "use");
++    }
++
++    // ------------------------------------------------------------------ Berechtigungen
++
++    /** Registriert alle Berechtigungen, damit Permission-Plugins sie kennen und anzeigen. */
++    public static void registerPermissions() {
++        PluginManager pm = Bukkit.getPluginManager();
++        Map<String, Boolean> children = new LinkedHashMap<>();
++        for (String sub : SUB.keySet()) {
++            String node = PERM_PREFIX + sub;
++            children.put(node, true);
++            if (pm.getPermission(node) == null) {
++                pm.addPermission(new Permission(node, "Tachyon: /wm " + sub, PermissionDefault.OP));
++            }
++        }
++        children.put(PERM_TP_OTHERS, true);
++        if (pm.getPermission(PERM_TP_OTHERS) == null) {
++            pm.addPermission(new Permission(PERM_TP_OTHERS, "Tachyon: /wm tp <world> <player>", PermissionDefault.OP));
++        }
++        if (pm.getPermission(PERM_PREFIX + "use") == null) {
++            pm.addPermission(new Permission(PERM_PREFIX + "use", "Tachyon: /wm", PermissionDefault.OP));
++        }
++        children.put(PERM_PREFIX + "use", true);
++        if (pm.getPermission(PERM_ALL) == null) {
++            pm.addPermission(new Permission(PERM_ALL, "Tachyon: alle /wm Befehle", PermissionDefault.OP, children));
++        }
++    }
++
++    private static boolean allowed(CommandSender sender, String sub) {
++        return sender.hasPermission(PERM_PREFIX + sub);
++    }
++
++    /** Sichtbar/nutzbar, sobald man mindestens einen Unterbefehl darf. */
++    @Override
++    public boolean testPermissionSilent(CommandSender target) {
++        if (target.hasPermission(PERM_PREFIX + "use")) {
++            return true;
++        }
++        for (String sub : SUB.keySet()) {
++            if (allowed(target, sub)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    // ------------------------------------------------------------------ Ausfuehren
 +
 +    @Override
 +    public boolean execute(CommandSender sender, String label, String[] args) {
@@ -1399,14 +2093,18 @@ index 000000000..da0ddd51f
 +        }
 +        WorldManager wm = WorldManager.get();
 +        if (wm == null) {
-+            sender.sendMessage(P + ChatColor.RED + "World-Manager ist nicht initialisiert.");
++            err(sender, t("cmd.not_initialized"));
 +            return true;
 +        }
-+        if (args.length == 0) {
++        if (args.length == 0 || !SUB.containsKey(args[0].toLowerCase(Locale.ROOT))) {
 +            help(sender, label);
 +            return true;
 +        }
 +        String sub = args[0].toLowerCase(Locale.ROOT);
++        if (!allowed(sender, sub)) {
++            err(sender, t("cmd.no_permission", PERM_PREFIX + sub));
++            return true;
++        }
 +        switch (sub) {
 +            case "create" -> create(wm, sender, label, args);
 +            case "load" -> load(wm, sender, label, args);
@@ -1421,7 +2119,7 @@ index 000000000..da0ddd51f
 +            case "pregen" -> pregen(wm, sender, label, args);
 +            case "reload" -> {
 +                wm.reloadConfig();
-+                ok(sender, "tachyon.yml neu geladen.");
++                ok(sender, t("cmd.reloaded"));
 +            }
 +            default -> help(sender, label);
 +        }
@@ -1429,58 +2127,69 @@ index 000000000..da0ddd51f
 +    }
 +
 +    private void help(CommandSender s, String label) {
-+        s.sendMessage(P + ChatColor.AQUA + "World-Manager - Welten laden ohne Server-Haenger");
-+        line(s, label, "create <name> [normal|flat|amplified|large_biomes|void|nether|end] [seed]", "neue Welt erstellen");
-+        line(s, label, "load <name> [normal|nether|end]", "vorhandenen Weltordner laden");
-+        line(s, label, "unload <name> [nosave]", "Welt entladen (bleibt auf der Festplatte)");
-+        line(s, label, "delete <name> confirm", "Welt entladen und endgueltig loeschen");
-+        line(s, label, "clone <quelle> <ziel>", "Welt kopieren (z.B. Vorlage fuer Minigames)");
-+        line(s, label, "tp <name> [spieler]", "zum Spawn einer Welt teleportieren (laedt sie bei Bedarf)");
-+        line(s, label, "list", "alle Welten mit Status");
-+        line(s, label, "info <name>", "Details zu einer Welt");
-+        line(s, label, "setspawn", "Weltspawn auf deine Position setzen");
-+        line(s, label, "autoload <name> <true|false>", "beim Serverstart automatisch laden");
-+        line(s, label, "pregen <name> <radius> | stop | status", "Welt im Hintergrund vorgenerieren (keine Lags beim Erkunden)");
++        String m = Style.col(s, Style.C_MUTED);
++        s.sendMessage(Style.line(s));
++        s.sendMessage(" " + Style.prefix(s) + ChatColor.BOLD + t("cmd.help.title"));
++        s.sendMessage("");
++        for (Map.Entry<String, String> e : SUB.entrySet()) {
++            if (allowed(s, e.getKey())) {
++                s.sendMessage(m + " \u25B8 " + Style.col(s, Style.C_ACCENT) + "/" + label + " " + localizeUsage(e.getValue()));
++                s.sendMessage(m + "     " + t("cmd.help." + e.getKey()));
++            }
++        }
++        s.sendMessage(Style.line(s));
 +    }
 +
-+    private static void line(CommandSender s, String label, String usage, String desc) {
-+        s.sendMessage(ChatColor.GRAY + " /" + label + " " + ChatColor.WHITE + usage + ChatColor.DARK_GRAY + " - " + ChatColor.GRAY + desc);
++    private static String localizeUsage(String usage) {
++        return usage.replace("<name>", "<" + t("arg.name") + ">").replace("<world>", "<" + t("arg.world") + ">")
++                .replace("[player]", "[" + t("arg.player") + "]").replace("<source>", "<" + t("arg.source") + ">")
++                .replace("<target>", "<" + t("arg.target") + ">").replace("<radius>", "<" + t("arg.radius") + ">");
++    }
++
++    private static void usage(CommandSender s, String label, String sub) {
++        err(s, t("cmd.usage", "/" + label + " " + localizeUsage(SUB.get(sub))));
 +    }
 +
 +    private static void ok(CommandSender s, String msg) {
-+        s.sendMessage(P + ChatColor.GREEN + msg);
++        Style.ok(s, msg);
 +    }
 +
 +    private static void err(CommandSender s, String msg) {
-+        s.sendMessage(P + ChatColor.RED + msg);
++        Style.err(s, msg);
 +    }
 +
 +    private static void info(CommandSender s, String msg) {
-+        s.sendMessage(P + ChatColor.GRAY + msg);
++        Style.info(s, msg);
 +    }
 +
 +    // ------------------------------------------------------------------ Unterbefehle
 +
 +    private void create(WorldManager wm, CommandSender s, String label, String[] a) {
 +        if (a.length < 2) {
-+            err(s, "Benutzung: /" + label + " create <name> [typ] [seed]");
++            usage(s, label, "create");
 +            return;
 +        }
 +        String name = a[1];
 +        if (Bukkit.getWorld(name) != null || wm.worldFolder(name).exists()) {
-+            err(s, "Welt/Ordner '" + name + "' existiert bereits. Nutze /" + label + " load " + name);
++            err(s, t("cmd.create.exists", name, label, name));
 +            return;
 +        }
 +        String typeArg = a.length >= 3 ? a[2].toLowerCase(Locale.ROOT) : "normal";
 +        World.Environment env = World.Environment.NORMAL;
 +        WorldManager.WorldSpec.Type type;
 +        switch (typeArg) {
-+            case "nether" -> { env = World.Environment.NETHER; type = WorldManager.WorldSpec.Type.NORMAL; }
-+            case "end", "the_end" -> { env = World.Environment.THE_END; type = WorldManager.WorldSpec.Type.NORMAL; }
++            case "nether" -> {
++                env = World.Environment.NETHER;
++                type = WorldManager.WorldSpec.Type.NORMAL;
++            }
++            case "end", "the_end" -> {
++                env = World.Environment.THE_END;
++                type = WorldManager.WorldSpec.Type.NORMAL;
++            }
 +            default -> type = WorldManager.WorldSpec.Type.parse(typeArg);
 +        }
 +        if (type == null) {
-+            err(s, "Unbekannter Typ '" + typeArg + "'. Moeglich: " + String.join(", ", TYPES));
++            err(s, t("cmd.create.unknown_type", typeArg, String.join(", ", TYPES)));
 +            return;
 +        }
 +        Long seed = null;
@@ -1492,43 +2201,30 @@ index 000000000..da0ddd51f
 +            }
 +        }
 +        WorldManager.WorldSpec spec = new WorldManager.WorldSpec(name, env, type, seed, true);
-+        info(s, "Erstelle Welt '" + name + "' (" + typeArg + ") - der Server laeuft dabei normal weiter...");
++        info(s, t("cmd.create.started", name, typeArg));
 +        long start = System.currentTimeMillis();
-+        wm.loadOrCreate(spec, w -> {
-+            ok(s, "Welt '" + w.getName() + "' ist bereit (" + (System.currentTimeMillis() - start) + " ms). Teleport: /" + label + " tp " + w.getName());
-+        }, msg -> err(s, msg));
++        wm.loadOrCreate(spec, true, w -> ok(s, t("cmd.create.ready", w.getName(), System.currentTimeMillis() - start, label, w.getName())), msg -> err(s, msg));
 +    }
 +
 +    private void load(WorldManager wm, CommandSender s, String label, String[] a) {
 +        if (a.length < 2) {
-+            err(s, "Benutzung: /" + label + " load <name> [normal|nether|end]");
++            usage(s, label, "load");
 +            return;
 +        }
 +        String name = a[1];
 +        if (!wm.worldExistsOnDisk(name)) {
-+            err(s, "Kein Weltordner '" + name + "' (mit level.dat) gefunden. Neue Welt: /" + label + " create " + name);
++            err(s, t("cmd.load.missing", name, label, name));
 +            return;
 +        }
-+        WorldManager.WorldSpec spec = wm.storedSpec(name);
-+        if (spec == null || a.length >= 3) {
-+            World.Environment env = World.Environment.NORMAL;
-+            if (a.length >= 3) {
-+                switch (a[2].toLowerCase(Locale.ROOT)) {
-+                    case "nether" -> env = World.Environment.NETHER;
-+                    case "end", "the_end" -> env = World.Environment.THE_END;
-+                    default -> env = World.Environment.NORMAL;
-+                }
-+            }
-+            spec = new WorldManager.WorldSpec(name, env, spec != null ? spec.type() : WorldManager.WorldSpec.Type.NORMAL, null, true);
-+        }
-+        info(s, "Lade Welt '" + name + "'...");
++        WorldManager.WorldSpec spec = wm.specFor(name, a.length >= 3 ? a[2] : null);
++        info(s, t("cmd.load.started", name));
 +        long start = System.currentTimeMillis();
-+        wm.loadOrCreate(spec, w -> ok(s, "Welt '" + w.getName() + "' geladen und bereit (" + (System.currentTimeMillis() - start) + " ms)."), msg -> err(s, msg));
++        wm.loadOrCreate(spec, true, w -> ok(s, t("cmd.load.ready", w.getName(), System.currentTimeMillis() - start)), msg -> err(s, msg));
 +    }
 +
 +    private void unload(WorldManager wm, CommandSender s, String label, String[] a) {
 +        if (a.length < 2) {
-+            err(s, "Benutzung: /" + label + " unload <name> [nosave]");
++            usage(s, label, "unload");
 +            return;
 +        }
 +        boolean save = !(a.length >= 3 && a[2].equalsIgnoreCase("nosave"));
@@ -1540,64 +2236,64 @@ index 000000000..da0ddd51f
 +        if (wm.managedWorlds().contains(a[1])) {
 +            wm.setAutoload(a[1], false);
 +        }
-+        ok(s, "Welt '" + a[1] + "' entladen" + (save ? " und gespeichert." : " (ohne Speichern)."));
++        ok(s, t(save ? "cmd.unload.done.save" : "cmd.unload.done.nosave", a[1]));
 +    }
 +
 +    private void delete(WorldManager wm, CommandSender s, String label, String[] a) {
 +        if (a.length < 3 || !a[2].equalsIgnoreCase("confirm")) {
-+            err(s, "Das loescht die Welt endgueltig! Bestaetigen mit: /" + label + " delete " + (a.length >= 2 ? a[1] : "<name>") + " confirm");
++            err(s, t("cmd.delete.confirm", label, a.length >= 2 ? a[1] : "<" + t("arg.name") + ">"));
 +            return;
 +        }
-+        info(s, "Loesche Welt '" + a[1] + "' im Hintergrund...");
++        info(s, t("cmd.delete.started", a[1]));
 +        wm.delete(a[1], msg -> ok(s, msg), msg -> err(s, msg));
 +    }
 +
 +    private void cloneWorld(WorldManager wm, CommandSender s, String label, String[] a) {
 +        if (a.length < 3) {
-+            err(s, "Benutzung: /" + label + " clone <quelle> <ziel>");
++            usage(s, label, "clone");
 +            return;
 +        }
-+        info(s, "Kopiere '" + a[1] + "' nach '" + a[2] + "' im Hintergrund...");
-+        wm.cloneWorld(a[1], a[2], w -> ok(s, "Welt '" + w.getName() + "' ist bereit."), msg -> err(s, msg));
++        info(s, t("cmd.clone.started", a[1], a[2]));
++        wm.cloneWorld(a[1], a[2], w -> ok(s, t("cmd.world.ready", w.getName())), msg -> err(s, msg));
 +    }
 +
 +    private void tp(WorldManager wm, CommandSender s, String label, String[] a) {
 +        if (a.length < 2) {
-+            err(s, "Benutzung: /" + label + " tp <welt> [spieler]");
++            usage(s, label, "tp");
 +            return;
 +        }
 +        Player target;
 +        if (a.length >= 3) {
++            if (!s.hasPermission(PERM_TP_OTHERS)) {
++                err(s, t("cmd.no_permission", PERM_TP_OTHERS));
++                return;
++            }
 +            target = Bukkit.getPlayerExact(a[2]);
 +            if (target == null) {
-+                err(s, "Spieler '" + a[2] + "' ist nicht online.");
++                err(s, t("cmd.tp.player_offline", a[2]));
 +                return;
 +            }
 +        } else if (s instanceof Player p) {
 +            target = p;
 +        } else {
-+            err(s, "Von der Konsole aus: /" + label + " tp <welt> <spieler>");
++            err(s, t("cmd.tp.console", label));
 +            return;
 +        }
 +        String name = a[1];
 +        World world = Bukkit.getWorld(name);
 +        if (world != null) {
 +            if (!wm.isReady(world)) {
-+                info(s, "Welt '" + name + "' wird noch vorbereitet - Teleport folgt automatisch.");
++                info(s, t("cmd.tp.preparing", name));
 +            }
 +            wm.teleportWhenReady(target, world);
 +            return;
 +        }
 +        if (!wm.worldExistsOnDisk(name)) {
-+            err(s, "Welt '" + name + "' existiert nicht.");
++            err(s, t("cmd.tp.missing", name));
 +            return;
 +        }
-+        WorldManager.WorldSpec spec = wm.storedSpec(name);
-+        if (spec == null) {
-+            spec = new WorldManager.WorldSpec(name, World.Environment.NORMAL, WorldManager.WorldSpec.Type.NORMAL, null, true);
-+        }
-+        info(s, "Welt '" + name + "' wird geladen - Teleport folgt automatisch.");
-+        wm.loadOrCreate(spec, w -> {
++        info(s, t("cmd.tp.loading", name));
++        wm.loadOrCreate(wm.specFor(name, null), true, w -> {
 +            if (target.isOnline()) {
 +                target.teleport(wm.safeSpawn(w));
 +            }
@@ -1605,14 +2301,15 @@ index 000000000..da0ddd51f
 +    }
 +
 +    private void list(WorldManager wm, CommandSender s) {
-+        s.sendMessage(P + ChatColor.AQUA + "Welten:");
++        s.sendMessage(Style.line(s));
++        s.sendMessage(" " + Style.prefix(s) + ChatColor.BOLD + t("cmd.list.title"));
 +        Set<String> seen = new LinkedHashSet<>();
 +        for (World w : Bukkit.getWorlds()) {
 +            seen.add(w.getName());
-+            String state = wm.isReady(w) ? ChatColor.GREEN + "geladen" : ChatColor.YELLOW + "wird vorbereitet";
++            String state = wm.isReady(w) ? ChatColor.GREEN + t("cmd.list.loaded") : ChatColor.YELLOW + t("cmd.list.preparing");
 +            s.sendMessage(ChatColor.GRAY + " - " + ChatColor.WHITE + w.getName() + ChatColor.DARK_GRAY + " [" + state + ChatColor.DARK_GRAY + "] "
-+                    + ChatColor.GRAY + w.getEnvironment().name().toLowerCase(Locale.ROOT) + ", " + w.getPlayers().size() + " Spieler, "
-+                    + w.getLoadedChunks().length + " Chunks" + (wm.isAutoload(w.getName()) ? ", autoload" : ""));
++                    + ChatColor.GRAY + t("cmd.list.details", w.getEnvironment().name().toLowerCase(Locale.ROOT), w.getPlayers().size(), w.getLoadedChunks().length)
++                    + (wm.isAutoload(w.getName()) ? ", " + t("cmd.list.autoload") : ""));
 +        }
 +        List<String> disk = new ArrayList<>(wm.worldFoldersOnDisk());
 +        disk.addAll(wm.managedWorlds());
@@ -1620,99 +2317,99 @@ index 000000000..da0ddd51f
 +            if (seen.add(name)) {
 +                boolean exists = wm.worldExistsOnDisk(name);
 +                s.sendMessage(ChatColor.GRAY + " - " + ChatColor.WHITE + name + ChatColor.DARK_GRAY + " ["
-+                        + (exists ? ChatColor.GRAY + "entladen" : ChatColor.RED + "Ordner fehlt") + ChatColor.DARK_GRAY + "]"
-+                        + (wm.isAutoload(name) ? ChatColor.GRAY + " autoload" : ""));
++                        + (exists ? ChatColor.GRAY + t("cmd.list.unloaded") : ChatColor.RED + t("cmd.list.folder_missing")) + ChatColor.DARK_GRAY + "]"
++                        + (wm.isAutoload(name) ? ChatColor.GRAY + " " + t("cmd.list.autoload") : ""));
 +            }
 +        }
 +    }
 +
 +    private void info(WorldManager wm, CommandSender s, String label, String[] a) {
 +        if (a.length < 2) {
-+            err(s, "Benutzung: /" + label + " info <name>");
++            usage(s, label, "info");
 +            return;
 +        }
 +        World w = Bukkit.getWorld(a[1]);
 +        if (w == null) {
-+            info(s, "Welt '" + a[1] + "' ist nicht geladen" + (wm.worldExistsOnDisk(a[1]) ? " (Ordner vorhanden)." : " und existiert nicht."));
++            info(s, t("cmd.info.not_loaded", a[1], t(wm.worldExistsOnDisk(a[1]) ? "cmd.info.folder_exists" : "cmd.info.not_exists")));
 +            return;
 +        }
 +        Location sp = w.getSpawnLocation();
-+        s.sendMessage(P + ChatColor.AQUA + w.getName());
-+        s.sendMessage(ChatColor.GRAY + " Status: " + (wm.isReady(w) ? "bereit" : "wird vorbereitet"));
-+        s.sendMessage(ChatColor.GRAY + " Umgebung: " + w.getEnvironment() + ", Seed: " + w.getSeed());
-+        s.sendMessage(ChatColor.GRAY + " Spawn: " + sp.getBlockX() + " / " + sp.getBlockY() + " / " + sp.getBlockZ());
-+        s.sendMessage(ChatColor.GRAY + " Spieler: " + w.getPlayers().size() + ", Chunks: " + w.getLoadedChunks().length + ", Entities: " + w.getEntities().size());
-+        s.sendMessage(ChatColor.GRAY + " Autoload: " + wm.isAutoload(w.getName()));
++        s.sendMessage(" " + Style.prefix(s) + ChatColor.BOLD + w.getName());
++        s.sendMessage(ChatColor.GRAY + " " + t("cmd.info.status", wm.isReady(w) ? t("cmd.info.status.ready") : t("cmd.list.preparing")));
++        s.sendMessage(ChatColor.GRAY + " " + t("cmd.info.env", w.getEnvironment().name(), w.getSeed()));
++        s.sendMessage(ChatColor.GRAY + " " + t("cmd.info.spawn", sp.getBlockX(), sp.getBlockY(), sp.getBlockZ()));
++        s.sendMessage(ChatColor.GRAY + " " + t("cmd.info.counts", w.getPlayers().size(), w.getLoadedChunks().length, w.getEntities().size()));
++        s.sendMessage(ChatColor.GRAY + " " + t("cmd.info.autoload", wm.isAutoload(w.getName())));
 +    }
 +
 +    private void setSpawn(CommandSender s) {
 +        if (!(s instanceof Player p)) {
-+            err(s, "Nur fuer Spieler.");
++            err(s, t("cmd.setspawn.players_only"));
 +            return;
 +        }
 +        Location l = p.getLocation();
 +        p.getWorld().setSpawnLocation(l);
-+        ok(s, "Spawn von '" + p.getWorld().getName() + "' gesetzt auf " + l.getBlockX() + " / " + l.getBlockY() + " / " + l.getBlockZ() + ".");
++        ok(s, t("cmd.setspawn.done", p.getWorld().getName(), l.getBlockX(), l.getBlockY(), l.getBlockZ()));
 +    }
 +
 +    private void autoload(WorldManager wm, CommandSender s, String label, String[] a) {
 +        if (a.length < 3) {
-+            err(s, "Benutzung: /" + label + " autoload <name> <true|false>");
++            usage(s, label, "autoload");
 +            return;
 +        }
 +        if (!wm.managedWorlds().contains(a[1])) {
-+            err(s, "Welt '" + a[1] + "' wird nicht vom World-Manager verwaltet. Einmal mit /" + label + " load laden.");
++            err(s, t("cmd.autoload.unmanaged", a[1], label));
 +            return;
 +        }
 +        boolean v = Boolean.parseBoolean(a[2]);
 +        wm.setAutoload(a[1], v);
-+        ok(s, "Autoload fuer '" + a[1] + "' = " + v);
++        ok(s, t("cmd.autoload.done", a[1], v));
 +    }
 +
 +    private void pregen(WorldManager wm, CommandSender s, String label, String[] a) {
 +        if (a.length >= 2 && a[1].equalsIgnoreCase("stop")) {
 +            String st = wm.stopPregen();
 +            if (st == null) {
-+                err(s, "Es laeuft keine Vorgenerierung.");
++                err(s, t("cmd.pregen.none"));
 +            } else {
-+                ok(s, "Vorgenerierung gestoppt. Stand: " + st);
++                ok(s, t("cmd.pregen.stopped", st));
 +            }
 +            return;
 +        }
 +        if (a.length >= 2 && a[1].equalsIgnoreCase("status")) {
 +            String st = wm.pregenStatus();
-+            info(s, st == null ? "Es laeuft keine Vorgenerierung." : st);
++            info(s, st == null ? t("cmd.pregen.none") : st);
 +            return;
 +        }
 +        if (a.length < 3) {
-+            err(s, "Benutzung: /" + label + " pregen <welt> <radius in Bloecken> | stop | status");
++            usage(s, label, "pregen");
 +            return;
 +        }
 +        World w = Bukkit.getWorld(a[1]);
 +        if (w == null) {
-+            err(s, "Welt '" + a[1] + "' ist nicht geladen.");
++            err(s, t("wm.err.not_loaded", a[1]));
 +            return;
 +        }
 +        int radius;
 +        try {
 +            radius = Integer.parseInt(a[2]);
 +        } catch (NumberFormatException e) {
-+            err(s, "Radius muss eine Zahl (Bloecke) sein, z.B. 2000.");
++            err(s, t("cmd.pregen.radius_nan"));
 +            return;
 +        }
 +        if (radius < 16 || radius > 50000) {
-+            err(s, "Radius bitte zwischen 16 und 50000 Bloecken.");
++            err(s, t("cmd.pregen.radius_range"));
 +            return;
 +        }
 +        String error = wm.startPregen(w, radius, msg -> {
 +            if (s instanceof Player p && p.isOnline()) {
-+                p.sendMessage(P + ChatColor.GRAY + msg);
++                Style.info(p, msg);
 +            }
 +        });
 +        if (error != null) {
 +            err(s, error);
 +        } else {
-+            ok(s, "Vorgenerierung fuer '" + w.getName() + "' gestartet (Radius " + radius + " Bloecke um den Spawn). Status: /" + label + " pregen status");
++            ok(s, t("cmd.pregen.started", w.getName(), radius, label));
 +        }
 +    }
 +
@@ -1725,9 +2422,18 @@ index 000000000..da0ddd51f
 +        }
 +        WorldManager wm = WorldManager.get();
 +        if (args.length == 1) {
-+            return filter(SUB, args[0]);
++            List<String> subs = new ArrayList<>();
++            for (String sub : SUB.keySet()) {
++                if (allowed(sender, sub)) {
++                    subs.add(sub);
++                }
++            }
++            return filter(subs, args[0]);
 +        }
 +        String sub = args[0].toLowerCase(Locale.ROOT);
++        if (!SUB.containsKey(sub) || !allowed(sender, sub)) {
++            return List.of();
++        }
 +        if (args.length == 2 && sub.equals("pregen")) {
 +            List<String> opts = new ArrayList<>(List.of("stop", "status"));
 +            for (World w : Bukkit.getWorlds()) {
@@ -1753,7 +2459,8 @@ index 000000000..da0ddd51f
 +                case "delete" -> filter(List.of("confirm"), args[2]);
 +                case "autoload" -> filter(List.of("true", "false"), args[2]);
 +                case "pregen" -> filter(List.of("1000", "2000", "5000", "10000"), args[2]);
-+                case "tp" -> filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), args[2]);
++                case "tp" -> sender.hasPermission(PERM_TP_OTHERS)
++                        ? filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), args[2]) : List.of();
 +                default -> List.of();
 +            };
 +        }
@@ -1772,7 +2479,7 @@ index 000000000..da0ddd51f
 +    }
 +}
 diff --git a/src/main/java/net/minecraft/server/Main.java b/src/main/java/net/minecraft/server/Main.java
-index c2177e77a..dba390076 100644
+index c2177e77a..e2a728cd0 100644
 --- a/src/main/java/net/minecraft/server/Main.java
 +++ b/src/main/java/net/minecraft/server/Main.java
 @@ -118,13 +118,18 @@ public class Main {
@@ -1791,20 +2498,45 @@ index c2177e77a..dba390076 100644
  
              Bootstrap.bootStrap();
              Bootstrap.validate();
-+            dev.tachyon.console.TachyonConsole.step("Minecraft-Kern geladen"); // Tachyon
++            dev.tachyon.console.TachyonConsole.step("core"); // Tachyon
              Util.startTimerHackThread();
              Path path1 = Paths.get("server.properties");
              DedicatedServerSettings dedicatedserversettings = new DedicatedServerSettings(optionset); // CraftBukkit - CLI argument support
-@@ -269,6 +274,7 @@ public class Main {
+@@ -132,6 +137,15 @@ public class Main {
+             dedicatedserversettings.forceSave();
+             RegionFileVersion.configure(dedicatedserversettings.getProperties().regionFileComression);
+             Path path2 = Paths.get("eula.txt");
++            // Tachyon start - beim ersten Start keine irrefuehrende "Failed to load eula.txt"-Warnung
++            if (!java.nio.file.Files.exists(path2)) {
++                try {
++                    java.nio.file.Files.writeString(path2, "#By changing the setting below to TRUE you are indicating your agreement to our EULA (https://aka.ms/MinecraftEULA).\neula=false\n");
++                } catch (IOException ignored) {
++                    // dann legt Vanilla sie selbst an
++                }
++            }
++            // Tachyon end
+             Eula eula = new Eula(path2);
+ 
+             if (optionset.has("initSettings")) { // CraftBukkit
+@@ -161,7 +175,7 @@ public class Main {
+                 System.err.println( "If you do not agree to the above EULA please stop your server and remove this flag immediately." );
+             }
+             // Spigot End
+-            if (!eula.hasAgreedToEULA() && !eulaAgreed) { // Spigot
++            if (!eula.hasAgreedToEULA() && !eulaAgreed && !dev.tachyon.console.TachyonConsole.askEula(path2)) { // Spigot // Tachyon - EULA in der Konsole annehmen
+                 Main.LOGGER.info("You need to agree to the EULA in order to run the server. Go to eula.txt for more info.");
+                 return;
+             }
+@@ -269,6 +283,7 @@ public class Main {
  
              levelstoragesource_levelstorageaccess.saveDataTag(worlddata);
              */
-+            dev.tachyon.console.TachyonConsole.step("Konfiguration & Datapacks"); // Tachyon
++            dev.tachyon.console.TachyonConsole.step("config"); // Tachyon
              final DedicatedServer dedicatedserver = (DedicatedServer) MinecraftServer.spin((thread) -> {
                  DedicatedServer dedicatedserver1 = new DedicatedServer(optionset, worldLoader.get(), thread, levelstoragesource_levelstorageaccess, packrepository, worldstem, Optional.empty(), dedicatedserversettings, DataFixers.getDataFixer(), services, managementserver, notificationmanager);
  
 diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
-index 4545f039c..804639063 100644
+index 4545f039c..49f4bce00 100644
 --- a/src/main/java/net/minecraft/server/MinecraftServer.java
 +++ b/src/main/java/net/minecraft/server/MinecraftServer.java
 @@ -526,8 +526,11 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -1815,7 +2547,7 @@ index 4545f039c..804639063 100644
 +        int tachyonWorldCount = dimensions.size(); // Tachyon
          for (LevelStem worldDimension : dimensions) {
              ResourceKey<LevelStem> dimensionKey = dimensions.getResourceKey(worldDimension).get();
-+            dev.tachyon.console.TachyonConsole.subProgress(0.76, 0.94, tachyonWorldIndex++, tachyonWorldCount, "Welten laden: " + dimensionKey.identifier().getPath()); // Tachyon
++            dev.tachyon.console.TachyonConsole.subProgress(0.76, 0.94, tachyonWorldIndex++, tachyonWorldCount, dev.tachyon.i18n.Lang.t("progress.worlds.load", dimensionKey.identifier().getPath())); // Tachyon
  
              ServerLevel world;
              int dimension = 0;
@@ -1901,7 +2633,7 @@ index 4545f039c..804639063 100644
  
      public ServerClockManager clockManager() {
 diff --git a/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java b/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java
-index 9959efd62..cf6d378a5 100644
+index 9959efd62..a50641139 100644
 --- a/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java
 +++ b/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java
 @@ -183,6 +183,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
@@ -1924,7 +2656,7 @@ index 9959efd62..cf6d378a5 100644
          // this.setPlayerList(new DedicatedPlayerList(this, this.registries(), this.playerDataStorage)); // Spigot - moved up
          server.loadPlugins();
          server.enablePlugins(org.bukkit.plugin.PluginLoadOrder.STARTUP);
-+        dev.tachyon.console.TachyonConsole.step("Plugins geladen"); // Tachyon
++        dev.tachyon.console.TachyonConsole.step("plugins"); // Tachyon
          // CraftBukkit end
  
          if (!this.usesAuthentication()) {
@@ -1932,7 +2664,7 @@ index 9959efd62..cf6d378a5 100644
              this.services.nameToIdCache().resolveOfflineUsers(!this.usesAuthentication());
              DedicatedServer.LOGGER.info("Preparing level \"{}\"", this.getLevelIdName());
              this.loadLevel(storageSource.getLevelId()); // CraftBukkit
-+            dev.tachyon.console.TachyonConsole.step("Welten geladen"); // Tachyon
++            dev.tachyon.console.TachyonConsole.step("worlds"); // Tachyon
              long j = Util.getNanos() - i;
              String s = String.format(Locale.ROOT, "%.3fs", (double) j / 1.0E9D);
  
@@ -2018,18 +2750,18 @@ index e37904285..c7117a3b5 100644
              if (event.isCancelled()) {
                  return true;
 diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
-index fe998af97..23b4897da 100644
+index fe998af97..f0fd6b36c 100644
 --- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 +++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 @@ -472,8 +472,11 @@ public final class CraftServer implements Server {
          File pluginFolder = (File) console.options.valueOf("plugins");
  
          if (pluginFolder.exists()) {
-+            dev.tachyon.console.TachyonConsole.progress(0.52, "Plugins suchen"); // Tachyon
++            dev.tachyon.console.TachyonConsole.progress(0.52, dev.tachyon.i18n.Lang.t("progress.plugins.search")); // Tachyon
              Plugin[] plugins = pluginManager.loadPlugins(pluginFolder);
 +            int tachyonIndex = 0; // Tachyon
              for (Plugin plugin : plugins) {
-+                dev.tachyon.console.TachyonConsole.subProgress(0.55, 0.65, tachyonIndex++, plugins.length, "Plugins laden: " + plugin.getName()); // Tachyon
++                dev.tachyon.console.TachyonConsole.subProgress(0.55, 0.65, tachyonIndex++, plugins.length, dev.tachyon.i18n.Lang.t("progress.plugins.load", plugin.getName())); // Tachyon
                  try {
                      String message = String.format("Loading %s", plugin.getDescription().getFullName());
                      plugin.getLogger().info(message);
@@ -2042,9 +2774,9 @@ index fe998af97..23b4897da 100644
              if ((!plugin.isEnabled()) && (plugin.getDescription().getLoad() == type)) {
 +                // Tachyon - Fortschritt pro Plugin
 +                if (type == PluginLoadOrder.STARTUP) {
-+                    dev.tachyon.console.TachyonConsole.subProgress(0.65, 0.75, tachyonIndex, plugins.length, "Plugins starten: " + plugin.getName());
++                    dev.tachyon.console.TachyonConsole.subProgress(0.65, 0.75, tachyonIndex, plugins.length, dev.tachyon.i18n.Lang.t("progress.plugins.enable", plugin.getName()));
 +                } else {
-+                    dev.tachyon.console.TachyonConsole.subProgress(0.95, 0.97, tachyonIndex, plugins.length, "Plugins starten: " + plugin.getName());
++                    dev.tachyon.console.TachyonConsole.subProgress(0.95, 0.97, tachyonIndex, plugins.length, dev.tachyon.i18n.Lang.t("progress.plugins.enable", plugin.getName()));
 +                }
                  enablePlugin(plugin);
              }
@@ -2053,7 +2785,7 @@ index fe998af97..23b4897da 100644
  
          if (type == PluginLoadOrder.POSTWORLD) {
 diff --git a/src/main/java/org/bukkit/craftbukkit/Main.java b/src/main/java/org/bukkit/craftbukkit/Main.java
-index 2c252ac4c..56b989c38 100644
+index 2c252ac4c..ede84998a 100644
 --- a/src/main/java/org/bukkit/craftbukkit/Main.java
 +++ b/src/main/java/org/bukkit/craftbukkit/Main.java
 @@ -7,7 +7,6 @@ import java.util.Arrays;
@@ -2073,7 +2805,7 @@ index 2c252ac4c..56b989c38 100644
 -                        System.err.println("*** Server will start in 20 seconds ***");
 -                        Thread.sleep(TimeUnit.SECONDS.toMillis(20));
 +                        // Tachyon - kein 20-Sekunden-Zwangswarten mehr bei aelteren Builds, nur ein Hinweis
-+                        System.err.println("*** Hinweis: Dieser Build ist aelter als 4 Wochen - bei Gelegenheit neu bauen. ***");
++                        System.err.println(dev.tachyon.i18n.Lang.t("console.old_build"));
                      }
                  }
  
@@ -2083,7 +2815,7 @@ index 2c252ac4c..56b989c38 100644
              } catch (Throwable t) {
                  t.printStackTrace();
 diff --git a/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java b/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java
-index 02c6eb198..2326539ed 100644
+index 02c6eb198..e44170796 100644
 --- a/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java
 +++ b/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java
 @@ -19,10 +19,19 @@ import java.nio.file.StandardCopyOption;
@@ -2106,7 +2838,7 @@ index 02c6eb198..2326539ed 100644
      public static void main(String[] argv) {
          new Main().run(argv);
      }
-@@ -32,18 +41,23 @@ public class Main {
+@@ -32,18 +41,24 @@ public class Main {
              String defaultMainClassName = readResource("main-class", BufferedReader::readLine);
              String mainClassName = System.getProperty("bundlerMainClass", defaultMainClassName);
  
@@ -2126,13 +2858,14 @@ index 02c6eb198..2326539ed 100644
              readAndExtractDir("libraries", outputDir, extractedUrls, readOnly);
 +            saveVerified(outputDir); // Tachyon
 +            if (unpacked > 0) {
-+                System.out.println("[Tachyon] " + unpacked + " Bibliotheken nach " + outputDir.getFileName() + " entpackt.");
++                boolean english = !isGerman();
++                System.out.println("[Tachyon] " + unpacked + (english ? " libraries unpacked to " : " Bibliotheken nach ") + outputDir.getFileName() + (english ? "." : " entpackt."));
 +            }
 +            writeLaunchArgs(outputDir, extractedUrls, defaultMainClassName); // Tachyon
  
              if (mainClassName == null || mainClassName.isEmpty()) {
                  System.out.println("Empty main class specified, exiting");
-@@ -97,11 +111,72 @@ public class Main {
+@@ -97,11 +112,89 @@ public class Main {
      }
  
      private void checkAndExtractJar(String subdir, FileEntry entry, Path outputFile) throws Exception {
@@ -2155,6 +2888,23 @@ index 02c6eb198..2326539ed 100644
 +    }
 +
 +    // Tachyon start
++    /** Sprache aus tachyon.yml (der Bootstrap laeuft vor dem eigentlichen Server). */
++    private static boolean isGerman() {
++        try {
++            Path config = Paths.get("tachyon.yml");
++            if (Files.isRegularFile(config)) {
++                for (String line : Files.readAllLines(config, StandardCharsets.UTF_8)) {
++                    if (line.startsWith("language:")) {
++                        return line.contains("de");
++                    }
++                }
++            }
++        } catch (IOException ignored) {
++            // Systemsprache
++        }
++        return "de".equals(java.util.Locale.getDefault().getLanguage());
++    }
++
 +    private void loadVerified(Path outputDir) {
 +        Path file = outputDir.resolve(VERIFIED_FILE);
 +        if (!Files.isRegularFile(file)) {
@@ -2208,7 +2958,7 @@ index 02c6eb198..2326539ed 100644
  
      private void extractJar(String subdir, String jarPath, Path outputFile) throws IOException {
          Files.createDirectories(outputFile.getParent());
-@@ -126,7 +201,7 @@ public class Main {
+@@ -126,7 +219,7 @@ public class Main {
                  return true;
              }
  
@@ -2218,32 +2968,44 @@ index 02c6eb198..2326539ed 100644
          return false;
      }
 diff --git a/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java b/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java
-index e44f048ff..f2c7685e9 100644
+index e44f048ff..83027c82e 100644
 --- a/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java
 +++ b/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java
-@@ -24,6 +24,9 @@ public class TerminalConsoleWriterThread extends Thread {
+@@ -24,6 +24,12 @@ public class TerminalConsoleWriterThread extends Thread {
      public void run() {
          String message;
  
 +        // Tachyon - Farben nur in echten Terminals; Pipes/Panels bekommen das klassische Format
 +        dev.tachyon.console.TachyonConsole.consoleReady();
++        if (Main.useJline && reader != null) {
++            dev.tachyon.console.TachyonConsole.attachTerminal(reader.getTerminal()); // Tachyon - Live-Balken
++        }
 +        final boolean color = Main.useJline && reader != null && !reader.getTerminal().getType().startsWith(org.jline.terminal.Terminal.TYPE_DUMB);
          // Using name from log4j config in vanilla jar
          while (true) {
              message = LogQueues.getNextLogEvent("TerminalConsole");
-@@ -31,6 +34,10 @@ public class TerminalConsoleWriterThread extends Thread {
+@@ -31,9 +37,18 @@ public class TerminalConsoleWriterThread extends Thread {
                  continue;
              }
  
 +            if (dev.tachyon.console.TachyonConsole.handleStartupLine(message, color)) { // Tachyon - ruhiger Start mit Ladebalken
 +                continue;
 +            }
++            if (message.indexOf("\tINFO\t") > 0 && dev.tachyon.console.TachyonConsole.isNoise(message.substring(message.indexOf('\t', message.indexOf("\tINFO\t") + 6) + 1))) { // Tachyon - Routine nur ins Logfile
++                continue;
++            }
 +            message = dev.tachyon.console.TachyonConsole.formatLine(message, color); // Tachyon
              try {
                  if (Main.useJline) {
-                     reader.printAbove(message);
+-                    reader.printAbove(message);
++                    synchronized (dev.tachyon.console.TachyonConsole.outputLock()) { // Tachyon - nicht mit Live-Balken kollidieren
++                        reader.printAbove(message);
++                    }
+                 } else {
+                     output.write(message.getBytes());
+                     output.flush();
 diff --git a/src/main/java/org/spigotmc/SpigotConfig.java b/src/main/java/org/spigotmc/SpigotConfig.java
-index 044e2a0d3..af1a7b19e 100644
+index 044e2a0d3..cd35ca7b2 100644
 --- a/src/main/java/org/spigotmc/SpigotConfig.java
 +++ b/src/main/java/org/spigotmc/SpigotConfig.java
 @@ -70,6 +70,7 @@ public class SpigotConfig
@@ -2254,8 +3016,11 @@ index 044e2a0d3..af1a7b19e 100644
  
          version = getInt( "config-version", 12 );
          set( "config-version", 12 );
-@@ -80,10 +81,10 @@ public class SpigotConfig
+@@ -78,12 +79,13 @@ public class SpigotConfig
+ 
+     public static void registerCommands()
      {
++        dev.tachyon.world.WorldManagerCommand.registerPermissions(); // Tachyon
          for ( Map.Entry<String, Command> entry : commands.entrySet() )
          {
 -            MinecraftServer.getServer().server.getCommandMap().register( entry.getKey(), "Spigot", entry.getValue() );
@@ -2267,6 +3032,117 @@ index 044e2a0d3..af1a7b19e 100644
          {
              try
              {
+diff --git a/src/main/java/org/spigotmc/SpigotWorldConfig.java b/src/main/java/org/spigotmc/SpigotWorldConfig.java
+index 2891e2537..6830d544d 100644
+--- a/src/main/java/org/spigotmc/SpigotWorldConfig.java
++++ b/src/main/java/org/spigotmc/SpigotWorldConfig.java
+@@ -20,7 +20,7 @@ public class SpigotWorldConfig
+ 
+     public void init()
+     {
+-        this.verbose = getBoolean( "verbose", true );
++        this.verbose = getBoolean( "verbose", false ) && Boolean.getBoolean( "tachyon.verboseStartup" ); // Tachyon - 30 Zeilen pro Welt nur auf Wunsch
+ 
+         log( "-------- World Settings For [" + worldName + "] --------" );
+         SpigotConfig.readConfig( SpigotWorldConfig.class, this );
+@@ -138,14 +138,14 @@ public class SpigotWorldConfig
+     public double itemMerge;
+     private void itemMerge()
+     {
+-        itemMerge = getDouble("merge-radius.item", 2.5 );
++        itemMerge = getDouble("merge-radius.item", 3.5 ); // Tachyon - weniger Item-Entities bei Farmen
+         log( "Item Merge Radius: " + itemMerge );
+     }
+ 
+     public double expMerge;
+     private void expMerge()
+     {
+-        expMerge = getDouble("merge-radius.exp", 3.0 );
++        expMerge = getDouble("merge-radius.exp", 4.0 ); // Tachyon - weniger XP-Orbs
+         log( "Experience Merge Radius: " + expMerge );
+     }
+ 
+diff --git a/src/main/java/org/spigotmc/TicksPerSecondCommand.java b/src/main/java/org/spigotmc/TicksPerSecondCommand.java
+index f5b6dec1c..f7b6f7104 100644
+--- a/src/main/java/org/spigotmc/TicksPerSecondCommand.java
++++ b/src/main/java/org/spigotmc/TicksPerSecondCommand.java
+@@ -23,20 +23,68 @@ public class TicksPerSecondCommand extends Command
+         {
+             return true;
+         }
+-
+-        StringBuilder sb = new StringBuilder( ChatColor.GOLD + "TPS from last 1m, 5m, 15m: " );
+-        for ( double tps : MinecraftServer.getServer().recentTps )
++        // Tachyon start - Leistungsuebersicht im Tachyon-Look
++        MinecraftServer server = MinecraftServer.getServer();
++        double[] tps = server.recentTps;
++        double now = Math.min( 20.0, tps[0] );
++        double mspt = server.getAverageTickTimeNanos() / 1_000_000.0;
++        double maxMspt = 0;
++        for ( long t : server.getTickTimesNanos() )
++        {
++            maxMspt = Math.max( maxMspt, t / 1_000_000.0 );
++        }
++        Runtime rt = Runtime.getRuntime();
++        long used = rt.totalMemory() - rt.freeMemory();
++        int chunks = 0, entities = 0;
++        for ( org.bukkit.World w : org.bukkit.Bukkit.getWorlds() )
+         {
+-            sb.append( format( tps ) );
+-            sb.append( ", " );
++            chunks += w.getLoadedChunks().length;
++            entities += w.getEntities().size();
+         }
+-        sender.sendMessage( sb.substring( 0, sb.length() - 2 ) );
+-        sender.sendMessage(ChatColor.GOLD + "Current Memory Usage: " + ChatColor.GREEN + ((Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / (1024 * 1024)) + "/" + (Runtime.getRuntime().totalMemory() / (1024 * 1024)) + " mb (Max: "
+-                + (Runtime.getRuntime().maxMemory() / (1024 * 1024)) + " mb)");
++        String m = dev.tachyon.text.Style.col( sender, dev.tachyon.text.Style.C_MUTED );
++        String tx = dev.tachyon.text.Style.col( sender, dev.tachyon.text.Style.C_TEXT );
++        String sep = m + "  \u00B7  " + tx;
+ 
++        sender.sendMessage( dev.tachyon.text.Style.line( sender ) );
++        sender.sendMessage( " " + dev.tachyon.text.Style.prefix( sender ) + ChatColor.BOLD + dev.tachyon.i18n.Lang.t( "tps.title" ) );
++        sender.sendMessage( "" );
++        sender.sendMessage( m + " TPS     " + dev.tachyon.text.Style.bar( sender, now / 20.0, 12, dev.tachyon.text.Style.tpsColor( now ) )
++                + " " + dev.tachyon.text.Style.col( sender, dev.tachyon.text.Style.tpsColor( now ) ) + ChatColor.BOLD + format1( now )
++                + m + "   1m " + colTps( sender, tps[0] ) + m + "  5m " + colTps( sender, tps[1] ) + m + "  15m " + colTps( sender, tps[2] ) );
++        sender.sendMessage( m + " MSPT    " + dev.tachyon.text.Style.bar( sender, mspt / 50.0, 12, dev.tachyon.text.Style.msptColor( mspt ) )
++                + " " + dev.tachyon.text.Style.col( sender, dev.tachyon.text.Style.msptColor( mspt ) ) + ChatColor.BOLD + format1( mspt ) + " ms"
++                + m + "   " + dev.tachyon.i18n.Lang.t( "tps.mspt.max" ) + " " + dev.tachyon.text.Style.col( sender, dev.tachyon.text.Style.msptColor( maxMspt ) ) + format1( maxMspt ) + " ms" );
++        sender.sendMessage( m + " RAM     " + dev.tachyon.text.Style.bar( sender, used / (double) rt.maxMemory(), 12, dev.tachyon.text.Style.C_ACCENT2 )
++                + " " + tx + ChatColor.BOLD + mb( used ) + m + " / " + mb( rt.maxMemory() )
++                + m + "   " + dev.tachyon.i18n.Lang.t( "tps.ram.reserved", mb( rt.totalMemory() ) ) );
++        sender.sendMessage( m + " " + dev.tachyon.i18n.Lang.t( "tps.world.label" ) + tx
++                + dev.tachyon.i18n.Lang.t( "tps.world", org.bukkit.Bukkit.getWorlds().size() ) + sep + dev.tachyon.i18n.Lang.t( "tps.chunks", chunks )
++                + sep + dev.tachyon.i18n.Lang.t( "tps.entities", entities ) + sep
++                + dev.tachyon.i18n.Lang.t( "tps.players", org.bukkit.Bukkit.getOnlinePlayers().size(), org.bukkit.Bukkit.getMaxPlayers() ) );
++        sender.sendMessage( dev.tachyon.text.Style.line( sender ) );
++        // Tachyon end
+         return true;
+     }
+ 
++    // Tachyon start
++    private static String colTps(CommandSender sender, double tps)
++    {
++        double v = Math.min( 20.0, tps );
++        return dev.tachyon.text.Style.col( sender, dev.tachyon.text.Style.tpsColor( v ) ) + format1( v );
++    }
++
++    private static String format1(double v)
++    {
++        return String.format( java.util.Locale.ROOT, "%.1f", v );
++    }
++
++    private static String mb(long bytes)
++    {
++        long mb = bytes / ( 1024 * 1024 );
++        return mb >= 1024 ? String.format( java.util.Locale.ROOT, "%.1f GB", mb / 1024.0 ) : mb + " MB";
++    }
++    // Tachyon end
++
+     private String format(double tps)
+     {
+         return ( ( tps > 18.0 ) ? ChatColor.GREEN : ( tps > 16.0 ) ? ChatColor.YELLOW : ChatColor.RED ).toString()
 diff --git a/src/main/resources/log4j2.xml b/src/main/resources/log4j2.xml
 index 0ff3f750f..941d3351a 100644
 --- a/src/main/resources/log4j2.xml
@@ -2298,6 +3174,360 @@ index 0ff3f750f..941d3351a 100644
          <Root level="info">
              <filters>
                  <MarkerFilter marker="NETWORK_PACKETS" onMatch="DENY" onMismatch="NEUTRAL" />
+diff --git a/src/main/resources/tachyon/lang/de.properties b/src/main/resources/tachyon/lang/de.properties
+new file mode 100644
+index 000000000..ac06c98e2
+--- /dev/null
++++ b/src/main/resources/tachyon/lang/de.properties
+@@ -0,0 +1,171 @@
++# Tachyon - deutsche Texte
++console.tagline=Minecraft-Server ohne Lags
++console.ram=RAM
++console.threads=Threads
++
++# Sprachwahl / EULA
++setup.language.question=Sprache waehlen / Choose language
++setup.language.option.de=Deutsch
++setup.language.option.en=English
++setup.language.chosen=Sprache: Deutsch (aenderbar in tachyon.yml, "language: de" oder "language: en")
++setup.eula.title=Minecraft-EULA
++setup.eula.text=Um den Server zu betreiben, musst du die Minecraft-EULA akzeptieren:
++setup.eula.question=EULA akzeptieren? (ja/nein):
++setup.eula.accepted=EULA akzeptiert - der Server startet weiter.
++setup.eula.declined=EULA nicht akzeptiert - der Server wird beendet. Du kannst sie spaeter auch in eula.txt annehmen (eula=true).
++setup.eula.yes=ja,j,yes,y
++
++# Ladebalken
++progress.java=Java gestartet
++progress.core=Minecraft-Kern geladen
++progress.config=Konfiguration & Datapacks
++progress.plugins.search=Plugins suchen
++progress.plugins.load=Plugins laden: %s
++progress.plugins.enable=Plugins starten: %s
++progress.plugins=Plugins geladen
++progress.worlds.load=Welten laden: %s
++progress.worlds=Welten geladen
++progress.ready=Bereit
++
++# Zusammenfassung
++summary.title=%s %s ist bereit  -  gestartet in %.1f s
++summary.port=Port
++summary.slots=%d Slots
++summary.online=Online-Modus
++summary.offline=Offline-Modus
++summary.whitelist.on=Whitelist an
++summary.whitelist.off=Whitelist aus
++summary.worlds=Welten
++summary.plugins=Plugins
++summary.plugins.none=keine (World-Manager ist eingebaut: /wm)
++summary.plugins.active=%d aktiv
++summary.plugins.failed=, %d FEHLGESCHLAGEN
++summary.system=System
++summary.ram=%s von %s RAM belegt
++summary.start=Start
++summary.start.ok=keine Warnungen oder Fehler
++summary.start.problems=%d Warnung(en), %d Fehler (Details in logs/latest.log)
++summary.commands=Befehle
++summary.commands.list=/wm  (Welten)  ·  /tps  ·  /stop
++console.old_build=*** Hinweis: Dieser Build ist aelter als 4 Wochen - bei Gelegenheit neu bauen. ***
++
++# World-Manager (Log)
++wm.log.created=Welt '%s' erstellt in %.1f ms (Main-Thread). Spawnbereich wird im Hintergrund generiert...
++wm.log.loaded=Welt '%s' geladen in %.1f ms (Main-Thread). Spawnbereich wird im Hintergrund generiert...
++wm.log.ready=Welt '%s' bereit  ·  %s in %.0f ms  ·  Spawnbereich %.1f s  ·  Server lief weiter
++wm.log.autoload=Lade %d Welt(en) im Hintergrund...
++wm.log.autoload.ready=Welt '%s' bereit.
++wm.log.folder_missing=Ordner fuer Welt '%s' fehlt - uebersprungen.
++wm.log.resume_spawn=Setze unterbrochene Spawnsuche fuer '%s' fort...
++wm.log.training_done=AOT-Training abgeschlossen - Server wird beendet, Java schreibt jetzt den Start-Cache...
++wm.config.header=Tachyon Konfiguration\n\nlanguage: de oder en - Sprache aller Tachyon-Texte\nstartup.fast-start: true = nicht auf die Spawnsuche warten, sie laeuft nach 'Done' im Hintergrund\nworld-manager.fast-world-creation-for-plugins: true = auch Plugin-Welten (z.B. Multiverse) ohne Server-Haenger\nworld-manager.spawn-preload-radius: Chunks um den Spawn, die vor 'bereit' geladen werden\nworld-manager.autoload-interval-ticks: Abstand zwischen zwei Welten beim automatischen Laden\nworld-manager.pregen-parallel-chunks: gleichzeitige Chunks bei /wm pregen (pausiert automatisch bei Lag)\nworlds: wird vom /wm Befehl verwaltet
++
++# World-Manager (Fehler/Meldungen)
++wm.err.invalid_name=Ungueltiger Weltname. Erlaubt: A-Z, a-z, 0-9, _ und - (max. 64 Zeichen).
++wm.err.load_failed=Welt '%s' konnte nicht geladen werden: %s
++wm.err.not_loaded=Welt '%s' ist nicht geladen.
++wm.err.main_world=Die Hauptwelt kann nicht entladen werden.
++wm.err.unload_failed=Welt '%s' konnte nicht entladen werden (ein Plugin hat es verhindert?).
++wm.err.protected=Die Standardwelten koennen nicht geloescht werden.
++wm.err.delete_failed=Loeschen fehlgeschlagen: %s
++wm.err.invalid_target=Ungueltiger Zielname.
++wm.err.source_missing=Quellwelt '%s' existiert nicht.
++wm.err.source_loaded=Quellwelt '%s' ist geladen - bitte zuerst /wm unload %s
++wm.err.target_exists=Zielordner '%s' existiert bereits.
++wm.err.copy_failed=Kopieren fehlgeschlagen: %s
++wm.msg.unload_teleport=Die Welt '%s' wird entladen, du wurdest zum Spawn gebracht.
++wm.msg.removed=Welt '%s' aus der Verwaltung entfernt (kein Ordner vorhanden).
++wm.msg.deleted=Welt '%s' wurde geloescht.
++wm.pregen.running=Es laeuft bereits eine Vorgenerierung fuer '%s'. Stoppen mit /wm pregen stop
++wm.pregen.started.log=Vorgenerierung gestartet: '%s', Radius %d Bloecke (%d Chunks).
++wm.pregen.aborted=Vorgenerierung abgebrochen: Welt '%s' wurde entladen.
++wm.pregen.done=Vorgenerierung von '%s' fertig: %d Chunks in %.0f s.
++wm.pregen.status=Pregen '%s': %d/%d Chunks (%d%%), %.0f Chunks/s, noch ca. %s%s
++wm.pregen.eta=%d min %d s
++wm.pregen.paused=, %d Ticks wegen Last pausiert
++
++# /wm Befehl
++cmd.desc=Tachyon World-Manager
++cmd.no_permission=Dafuer fehlt dir die Berechtigung (%s).
++cmd.not_initialized=World-Manager ist nicht initialisiert.
++cmd.help.title=World-Manager - Welten laden ohne Server-Haenger
++cmd.help.create=neue Welt erstellen
++cmd.help.load=vorhandenen Weltordner laden
++cmd.help.unload=Welt entladen (bleibt auf der Festplatte)
++cmd.help.delete=Welt entladen und endgueltig loeschen
++cmd.help.clone=Welt kopieren (z.B. Vorlage fuer Minigames)
++cmd.help.tp=zum Spawn einer Welt teleportieren (laedt sie bei Bedarf)
++cmd.help.list=alle Welten mit Status
++cmd.help.info=Details zu einer Welt
++cmd.help.setspawn=Weltspawn auf deine Position setzen
++cmd.help.autoload=beim Serverstart automatisch laden
++cmd.help.pregen=Welt im Hintergrund vorgenerieren (keine Lags beim Erkunden)
++cmd.help.reload=tachyon.yml neu laden
++cmd.usage=Benutzung: %s
++cmd.reloaded=tachyon.yml neu geladen.
++cmd.create.exists=Welt/Ordner '%s' existiert bereits. Nutze /%s load %s
++cmd.create.unknown_type=Unbekannter Typ '%s'. Moeglich: %s
++cmd.create.started=Erstelle Welt '%s' (%s) - der Server laeuft dabei normal weiter...
++cmd.create.ready=Welt '%s' ist bereit (%d ms). Teleport: /%s tp %s
++cmd.load.missing=Kein Weltordner '%s' (mit level.dat) gefunden. Neue Welt: /%s create %s
++cmd.load.started=Lade Welt '%s'...
++cmd.load.ready=Welt '%s' geladen und bereit (%d ms).
++cmd.unload.done.save=Welt '%s' entladen und gespeichert.
++cmd.unload.done.nosave=Welt '%s' entladen (ohne Speichern).
++cmd.delete.confirm=Das loescht die Welt endgueltig! Bestaetigen mit: /%s delete %s confirm
++cmd.delete.started=Loesche Welt '%s' im Hintergrund...
++cmd.clone.started=Kopiere '%s' nach '%s' im Hintergrund...
++cmd.world.ready=Welt '%s' ist bereit.
++cmd.tp.player_offline=Spieler '%s' ist nicht online.
++cmd.tp.console=Von der Konsole aus: /%s tp <welt> <spieler>
++cmd.tp.preparing=Welt '%s' wird noch vorbereitet - Teleport folgt automatisch.
++cmd.tp.missing=Welt '%s' existiert nicht.
++cmd.tp.loading=Welt '%s' wird geladen - Teleport folgt automatisch.
++cmd.list.title=Welten:
++cmd.list.loaded=geladen
++cmd.list.preparing=wird vorbereitet
++cmd.list.unloaded=entladen
++cmd.list.folder_missing=Ordner fehlt
++cmd.list.details=%s, %d Spieler, %d Chunks
++cmd.list.autoload=autoload
++cmd.info.not_loaded=Welt '%s' ist nicht geladen%s
++cmd.info.folder_exists= (Ordner vorhanden).
++cmd.info.not_exists= und existiert nicht.
++cmd.info.status=Status: %s
++cmd.info.status.ready=bereit
++cmd.info.env=Umgebung: %s, Seed: %d
++cmd.info.spawn=Spawn: %d / %d / %d
++cmd.info.counts=Spieler: %d, Chunks: %d, Entities: %d
++cmd.info.autoload=Autoload: %s
++cmd.setspawn.players_only=Nur fuer Spieler.
++cmd.setspawn.done=Spawn von '%s' gesetzt auf %d / %d / %d.
++cmd.autoload.unmanaged=Welt '%s' wird nicht vom World-Manager verwaltet. Einmal mit /%s load laden.
++cmd.autoload.done=Autoload fuer '%s' = %s
++cmd.pregen.none=Es laeuft keine Vorgenerierung.
++cmd.pregen.stopped=Vorgenerierung gestoppt. Stand: %s
++cmd.pregen.radius_nan=Radius muss eine Zahl (Bloecke) sein, z.B. 2000.
++cmd.pregen.radius_range=Radius bitte zwischen 16 und 50000 Bloecken.
++cmd.pregen.started=Vorgenerierung fuer '%s' gestartet (Radius %d Bloecke um den Spawn). Status: /%s pregen status
++arg.world=welt
++arg.player=spieler
++arg.name=name
++arg.type=typ
++arg.source=quelle
++arg.target=ziel
++arg.radius=radius
++
++# /tps
++tps.title=Server-Leistung
++tps.mspt.max=max
++tps.ram.reserved=(reserviert %s)
++tps.world.label=Server  
++tps.world=%d Welten
++tps.chunks=%,d Chunks
++tps.entities=%,d Entities
++tps.players=%d/%d Spieler
++wm.word.created=erstellt
++wm.word.loaded=geladen
++live.world=Welt '%s'  ·  %s
++live.phase.search=Spawn suchen
++live.phase.spawn=Spawnbereich generieren
++live.pregen=Pregen '%s'  ·  %s Chunks/s  ·  noch %s
+diff --git a/src/main/resources/tachyon/lang/en.properties b/src/main/resources/tachyon/lang/en.properties
+new file mode 100644
+index 000000000..ad6ddb92f
+--- /dev/null
++++ b/src/main/resources/tachyon/lang/en.properties
+@@ -0,0 +1,171 @@
++# Tachyon - English texts
++console.tagline=Minecraft server without lag
++console.ram=RAM
++console.threads=threads
++
++# Language / EULA
++setup.language.question=Sprache waehlen / Choose language
++setup.language.option.de=Deutsch
++setup.language.option.en=English
++setup.language.chosen=Language: English (change it in tachyon.yml, "language: en" or "language: de")
++setup.eula.title=Minecraft EULA
++setup.eula.text=To run the server you have to accept the Minecraft EULA:
++setup.eula.question=Accept the EULA? (yes/no):
++setup.eula.accepted=EULA accepted - the server keeps starting.
++setup.eula.declined=EULA not accepted - the server will stop. You can also accept it later in eula.txt (eula=true).
++setup.eula.yes=yes,y,ja,j
++
++# Progress bar
++progress.java=Java started
++progress.core=Minecraft core loaded
++progress.config=Configuration & datapacks
++progress.plugins.search=Looking for plugins
++progress.plugins.load=Loading plugins: %s
++progress.plugins.enable=Enabling plugins: %s
++progress.plugins=Plugins loaded
++progress.worlds.load=Loading worlds: %s
++progress.worlds=Worlds loaded
++progress.ready=Ready
++
++# Summary
++summary.title=%s %s is ready  -  started in %.1f s
++summary.port=Port
++summary.slots=%d slots
++summary.online=online mode
++summary.offline=offline mode
++summary.whitelist.on=whitelist on
++summary.whitelist.off=whitelist off
++summary.worlds=Worlds
++summary.plugins=Plugins
++summary.plugins.none=none (world manager is built in: /wm)
++summary.plugins.active=%d active
++summary.plugins.failed=, %d FAILED
++summary.system=System
++summary.ram=%s of %s RAM used
++summary.start=Startup
++summary.start.ok=no warnings or errors
++summary.start.problems=%d warning(s), %d error(s) (details in logs/latest.log)
++summary.commands=Commands
++summary.commands.list=/wm  (worlds)  ·  /tps  ·  /stop
++console.old_build=*** Note: this build is older than 4 weeks - consider rebuilding it. ***
++
++# World manager (log)
++wm.log.created=World '%s' created in %.1f ms (main thread). Spawn area is generated in the background...
++wm.log.loaded=World '%s' loaded in %.1f ms (main thread). Spawn area is generated in the background...
++wm.log.ready=World '%s' ready  ·  %s in %.0f ms  ·  spawn area %.1f s  ·  server kept running
++wm.log.autoload=Loading %d world(s) in the background...
++wm.log.autoload.ready=World '%s' ready.
++wm.log.folder_missing=Folder for world '%s' is missing - skipped.
++wm.log.resume_spawn=Resuming interrupted spawn search for '%s'...
++wm.log.training_done=AOT training finished - stopping the server, Java now writes the startup cache...
++wm.config.header=Tachyon configuration\n\nlanguage: de or en - language of all Tachyon texts\nstartup.fast-start: true = don't wait for the spawn search, it runs in the background after 'Done'\nworld-manager.fast-world-creation-for-plugins: true = plugin worlds (e.g. Multiverse) are created without server freezes too\nworld-manager.spawn-preload-radius: chunks around spawn that are loaded before a world is 'ready'\nworld-manager.autoload-interval-ticks: delay between two worlds when loading automatically\nworld-manager.pregen-parallel-chunks: chunks generated at once by /wm pregen (pauses automatically on lag)\nworlds: managed by the /wm command
++
++# World manager (errors/messages)
++wm.err.invalid_name=Invalid world name. Allowed: A-Z, a-z, 0-9, _ and - (max. 64 characters).
++wm.err.load_failed=World '%s' could not be loaded: %s
++wm.err.not_loaded=World '%s' is not loaded.
++wm.err.main_world=The main world cannot be unloaded.
++wm.err.unload_failed=World '%s' could not be unloaded (blocked by a plugin?).
++wm.err.protected=The default worlds cannot be deleted.
++wm.err.delete_failed=Deleting failed: %s
++wm.err.invalid_target=Invalid target name.
++wm.err.source_missing=Source world '%s' does not exist.
++wm.err.source_loaded=Source world '%s' is loaded - run /wm unload %s first
++wm.err.target_exists=Target folder '%s' already exists.
++wm.err.copy_failed=Copying failed: %s
++wm.msg.unload_teleport=World '%s' is being unloaded, you were sent to spawn.
++wm.msg.removed=World '%s' removed from the manager (no folder present).
++wm.msg.deleted=World '%s' was deleted.
++wm.pregen.running=A pregeneration for '%s' is already running. Stop it with /wm pregen stop
++wm.pregen.started.log=Pregeneration started: '%s', radius %d blocks (%d chunks).
++wm.pregen.aborted=Pregeneration aborted: world '%s' was unloaded.
++wm.pregen.done=Pregeneration of '%s' finished: %d chunks in %.0f s.
++wm.pregen.status=Pregen '%s': %d/%d chunks (%d%%), %.0f chunks/s, about %s left%s
++wm.pregen.eta=%d min %d s
++wm.pregen.paused=, paused %d ticks due to load
++
++# /wm command
++cmd.desc=Tachyon world manager
++cmd.no_permission=You don't have permission for this (%s).
++cmd.not_initialized=The world manager is not initialized.
++cmd.help.title=World manager - load worlds without server freezes
++cmd.help.create=create a new world
++cmd.help.load=load an existing world folder
++cmd.help.unload=unload a world (stays on disk)
++cmd.help.delete=unload and permanently delete a world
++cmd.help.clone=copy a world (e.g. a minigame template)
++cmd.help.tp=teleport to a world's spawn (loads it if needed)
++cmd.help.list=all worlds with their status
++cmd.help.info=details about a world
++cmd.help.setspawn=set the world spawn to your position
++cmd.help.autoload=load automatically on server start
++cmd.help.pregen=pregenerate a world in the background (no lag while exploring)
++cmd.help.reload=reload tachyon.yml
++cmd.usage=Usage: %s
++cmd.reloaded=tachyon.yml reloaded.
++cmd.create.exists=World/folder '%s' already exists. Use /%s load %s
++cmd.create.unknown_type=Unknown type '%s'. Possible: %s
++cmd.create.started=Creating world '%s' (%s) - the server keeps running normally...
++cmd.create.ready=World '%s' is ready (%d ms). Teleport: /%s tp %s
++cmd.load.missing=No world folder '%s' (with level.dat) found. New world: /%s create %s
++cmd.load.started=Loading world '%s'...
++cmd.load.ready=World '%s' loaded and ready (%d ms).
++cmd.unload.done.save=World '%s' unloaded and saved.
++cmd.unload.done.nosave=World '%s' unloaded (without saving).
++cmd.delete.confirm=This permanently deletes the world! Confirm with: /%s delete %s confirm
++cmd.delete.started=Deleting world '%s' in the background...
++cmd.clone.started=Copying '%s' to '%s' in the background...
++cmd.world.ready=World '%s' is ready.
++cmd.tp.player_offline=Player '%s' is not online.
++cmd.tp.console=From the console: /%s tp <world> <player>
++cmd.tp.preparing=World '%s' is still being prepared - you will be teleported automatically.
++cmd.tp.missing=World '%s' does not exist.
++cmd.tp.loading=Loading world '%s' - you will be teleported automatically.
++cmd.list.title=Worlds:
++cmd.list.loaded=loaded
++cmd.list.preparing=preparing
++cmd.list.unloaded=unloaded
++cmd.list.folder_missing=folder missing
++cmd.list.details=%s, %d players, %d chunks
++cmd.list.autoload=autoload
++cmd.info.not_loaded=World '%s' is not loaded%s
++cmd.info.folder_exists= (folder exists).
++cmd.info.not_exists= and does not exist.
++cmd.info.status=Status: %s
++cmd.info.status.ready=ready
++cmd.info.env=Environment: %s, seed: %d
++cmd.info.spawn=Spawn: %d / %d / %d
++cmd.info.counts=Players: %d, chunks: %d, entities: %d
++cmd.info.autoload=Autoload: %s
++cmd.setspawn.players_only=Players only.
++cmd.setspawn.done=Spawn of '%s' set to %d / %d / %d.
++cmd.autoload.unmanaged=World '%s' is not managed by the world manager. Load it once with /%s load.
++cmd.autoload.done=Autoload for '%s' = %s
++cmd.pregen.none=No pregeneration is running.
++cmd.pregen.stopped=Pregeneration stopped. Progress: %s
++cmd.pregen.radius_nan=The radius has to be a number (blocks), e.g. 2000.
++cmd.pregen.radius_range=Please use a radius between 16 and 50000 blocks.
++cmd.pregen.started=Pregeneration for '%s' started (radius %d blocks around spawn). Status: /%s pregen status
++arg.world=world
++arg.player=player
++arg.name=name
++arg.type=type
++arg.source=source
++arg.target=target
++arg.radius=radius
++
++# /tps
++tps.title=Server performance
++tps.mspt.max=max
++tps.ram.reserved=(reserved %s)
++tps.world.label=Server  
++tps.world=%d worlds
++tps.chunks=%,d chunks
++tps.entities=%,d entities
++tps.players=%d/%d players
++wm.word.created=created
++wm.word.loaded=loaded
++live.world=World '%s'  ·  %s
++live.phase.search=searching spawn
++live.phase.spawn=generating spawn area
++live.pregen=Pregen '%s'  ·  %s chunks/s  ·  %s left
 diff --git a/src/main/resources/tachyon/server-icon.png b/src/main/resources/tachyon/server-icon.png
 new file mode 100644
 index 0000000000000000000000000000000000000000..f86e4b5fc16a9980013c06ac72c0baf4156aaf0b
