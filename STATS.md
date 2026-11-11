@@ -134,7 +134,21 @@ Weil während der Tests nebenbei am PC gearbeitet wurde, habe ich den auffällig
 | Spigot: Welt erstellen | 6.813 ms | 5.363 ms |
 | Tachyon: Welt erstellen | 212 ms | 256 ms |
 
-Die Abweichungen liegen bei wenigen Prozent – die Ergebnisse sind reproduzierbar. Warum Tachyon auf *einem* Kern beim Chunk-Test doppelt so schnell ist, ist noch nicht sicher geklärt. Vermutung: Spigot generiert beim Welt-Erstellen bis zu 121 Spawn-Chunks synchron, deren Speichern danach auf dem einzigen Kern mit dem Chunk-Test konkurriert. Ab 2 Kernen sind beide gleichauf. Die 2-Kern/512-MB-Zeile stammt aus der Gegenprobe.
+Die Abweichungen liegen bei wenigen Prozent – die Ergebnisse sind reproduzierbar.
+
+**Warum ist Tachyon auf *einem* Kern beim Chunk-Generieren schneller?** Untersucht – Ursache noch offen:
+
+| Gegenprobe (1 Kern, 512 MB, 121 Chunks) | Spigot | Tachyon |
+|---|---:|---:|
+| Ohne vorheriges Welt-Erstellen | 17,5 s | 9,6 s |
+| Welt erstellen, 3 s warten | 12,6 s | 7,9 s |
+| Welt erstellen, 30 s warten | 13,6 s | 8,3 s |
+| **Derselbe Kern, nacheinander, beide Reihenfolgen** (Mittel aus 2) | 18,4 s | 11,1 s |
+| Tachyon mit abgeschaltetem Schnellstart | – | 11,3 – 12,3 s |
+
+- Ausgeschlossen: unterschiedliche CPU-Kerne, Reihenfolge, Reste vom Welt-Erstellen, Tachyons Schnellstart, unterschiedliche Spigot-Stände (beide basieren auf Build 4664).
+- Java-Flight-Recorder-Profil: beide verbringen ihre Rechenzeit in denselben Methoden der Weltgenerierung; Spigot führt aber pro Sekunde weniger Java-Code aus und wartet mehr.
+- Ab 2 Kernen verschwindet der Unterschied – für Server mit mehreren Kernen ist er daher kaum relevant.
 
 **Hinweise zur Ehrlichkeit**
 - Beim Chunk-Test fordert das Mess-Plugin Chunks über die Plugin-API an. Diese lädt bei **beiden** Servern synchron, deshalb ist dort die *Dauer* aussagekräftig, nicht die TPS.

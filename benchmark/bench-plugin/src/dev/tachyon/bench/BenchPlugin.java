@@ -87,9 +87,45 @@ public final class BenchPlugin extends JavaPlugin {
             case "mem" -> mem();
             case "events" -> events(args.length > 1 ? Integer.parseInt(args[1]) : 2_000_000);
             case "chunks" -> chunks(args.length > 1 ? Integer.parseInt(args[1]) : 5);
+            case "watch" -> watch(args.length > 1 ? Integer.parseInt(args[1]) : 20);
             default -> sender.sendMessage("unbekannt");
         }
         return true;
+    }
+
+    /** Chunk-Zustand einer Welt: voll geladen / alle Chunk-Holder (inkl. halb generierter) / wartet aufs Entladen / zum Verwerfen. */
+    private static String chunkStats(World w) {
+        try {
+            Object level = w.getClass().getMethod("getHandle").invoke(w);
+            Object src = level.getClass().getMethod("getChunkSource").invoke(level);
+            Object map = src.getClass().getField("chunkMap").get(src);
+            int holders = (int) map.getClass().getMethod("size").invoke(map);
+            java.lang.reflect.Field pu = map.getClass().getDeclaredField("pendingUnloads");
+            pu.setAccessible(true);
+            java.lang.reflect.Field td = map.getClass().getDeclaredField("toDrop");
+            td.setAccessible(true);
+            return w.getLoadedChunks().length + "/" + holders + "/" + ((java.util.Map<?, ?>) pu.get(map)).size() + "/" + ((java.util.Set<?>) td.get(map)).size();
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return "?";
+        }
+    }
+
+    /** Jede Sekunde den Chunk-Zustand aller Welten ausgeben (voll/holder/pendingUnload/toDrop). */
+    private void watch(int seconds) {
+        long start = System.nanoTime();
+        int[] taskId = new int[1];
+        int[] n = new int[1];
+        taskId[0] = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
+            StringBuilder sb = new StringBuilder();
+            for (World w : Bukkit.getWorlds()) {
+                sb.append(' ').append(w.getName()).append('=').append(chunkStats(w));
+            }
+            Bukkit.getLogger().info(String.format(Locale.ROOT, "[BENCH] WATCH t=%.0f%s", (System.nanoTime() - start) / 1e9, sb));
+            if (++n[0] > seconds) {
+                Bukkit.getScheduler().cancelTask(taskId[0]);
+                result("watch", "seconds=" + seconds);
+            }
+        }, 0L, 20L);
     }
 
     /**
