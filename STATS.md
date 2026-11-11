@@ -82,7 +82,7 @@ Tachyon passt sich an: Unter ~400 MB lädt es beim Erstellen einer Welt nur noch
 | 192 MB | 3.177 ms | 229 ms | 13,7 s | 15,4 s | 13,6 s | 9,8 s |
 | 256 MB | 2.460 ms | 158 ms | 8,3 s | 8,8 s | 11,7 s | 9,7 s |
 | 384 MB | 2.837 ms | 93 ms | 7,4 s | 7,4 s | 10,4 s | 9,0 s |
-| 512 MB | – | 142 ms | – | 6,9 s | – | 10,9 s |
+| 512 MB | 2.622 ms | 163 ms | 7,3 s | 6,6 s | 9,7 s | 9,7 s |
 
 ### 3 CPU-Kerne
 
@@ -123,6 +123,18 @@ Tachyon passt sich an: Unter ~400 MB lädt es beim Erstellen einer Welt nur noch
 | **Welt** | gleicher Seed, vorher einmal erzeugt und vor jedem Lauf zurückgesetzt |
 | **Ablauf pro Stufe** | Start → 10 s Leerlauf → neue Welt erstellen → 121 neue Chunks (Maximal-Test: 625) → RAM messen |
 | **Werkzeuge** | [`benchmark/lowres.py`](benchmark/lowres.py), Mess-Plugin [`benchmark/bench-plugin`](benchmark/bench-plugin), Grafiken: [`benchmark/make_stats.py`](benchmark/make_stats.py) |
+
+**Gegenprobe bei ruhendem PC**
+Weil während der Tests nebenbei am PC gearbeitet wurde, habe ich den auffälligsten Wert noch einmal gemessen, während der PC nichts anderes tat:
+
+| 1 CPU-Kern · 512 MB | erster Lauf | Gegenprobe |
+|---|---:|---:|
+| Spigot: 121 Chunks | 17,0 s | 17,3 s |
+| Tachyon: 121 Chunks | 8,2 s | 8,9 s |
+| Spigot: Welt erstellen | 6.813 ms | 5.363 ms |
+| Tachyon: Welt erstellen | 212 ms | 256 ms |
+
+Die Abweichungen liegen bei wenigen Prozent – die Ergebnisse sind reproduzierbar. Warum Tachyon auf *einem* Kern beim Chunk-Test doppelt so schnell ist, ist noch nicht sicher geklärt. Vermutung: Spigot generiert beim Welt-Erstellen bis zu 121 Spawn-Chunks synchron, deren Speichern danach auf dem einzigen Kern mit dem Chunk-Test konkurriert. Ab 2 Kernen sind beide gleichauf. Die 2-Kern/512-MB-Zeile stammt aus der Gegenprobe.
 
 **Hinweise zur Ehrlichkeit**
 - Beim Chunk-Test fordert das Mess-Plugin Chunks über die Plugin-API an. Diese lädt bei **beiden** Servern synchron, deshalb ist dort die *Dauer* aussagekräftig, nicht die TPS.
