@@ -1,0 +1,18 @@
+Tachyon - Patches fuer Spigot/CraftBukkit/Bukkit
+
+Diese Patches sind abgeleitete Werke von Spigot, CraftBukkit und Bukkit und
+stehen wie diese unter der GNU General Public License, Version 3 (GPL-3.0).
+
+Der vollstaendige Lizenztext:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 3 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+Minecraft ist eine Marke von Mojang AB. Dieses Projekt enthaelt keinen
+Minecraft-Code; die Server-Jar wird lokal mit BuildTools gebaut.

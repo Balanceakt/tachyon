@@ -1,0 +1,238 @@
+diff --git a/src/main/java/org/bukkit/event/world/AsyncStructureSpawnEvent.java b/src/main/java/org/bukkit/event/world/AsyncStructureSpawnEvent.java
+index 5f05b32b..a7b7f1ab 100644
+--- a/src/main/java/org/bukkit/event/world/AsyncStructureSpawnEvent.java
++++ b/src/main/java/org/bukkit/event/world/AsyncStructureSpawnEvent.java
+@@ -21,7 +21,12 @@ public class AsyncStructureSpawnEvent extends WorldEvent implements Cancellable
+     private final int chunkX, chunkZ;
+ 
+     public AsyncStructureSpawnEvent(@NotNull World world, @NotNull Structure structure, @NotNull BoundingBox boundingBox, int chunkX, int chunkZ) {
+-        super(world, true);
++        this(world, true, structure, boundingBox, chunkX, chunkZ);
++    }
++
++    // Tachyon - Event kann auch auf dem Main-Thread entstehen (z.B. wenn beim Stoppen restliche Chunks generiert werden)
++    public AsyncStructureSpawnEvent(@NotNull World world, boolean isAsync, @NotNull Structure structure, @NotNull BoundingBox boundingBox, int chunkX, int chunkZ) {
++        super(world, isAsync);
+         this.structure = structure;
+         this.boundingBox = boundingBox;
+         this.chunkX = chunkX;
+diff --git a/src/main/java/org/bukkit/plugin/SimplePluginManager.java b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+index ccf2aafc..67773060 100644
+--- a/src/main/java/org/bukkit/plugin/SimplePluginManager.java
++++ b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+@@ -128,6 +128,25 @@ public final class SimplePluginManager implements PluginManager {
+      * @param files List of files containing plugins to load
+      * @return A list of all plugins loaded
+      */
++    // Tachyon - Ergebnis des parallelen Lesens abholen; Fehler genau wie beim seriellen Lesen werfen
++    @NotNull
++    private static PluginDescriptionFile awaitDescription(@Nullable java.util.concurrent.CompletableFuture<PluginDescriptionFile> future, @NotNull PluginLoader loader, @NotNull File file) throws InvalidDescriptionException {
++        if (future == null) {
++            return loader.getPluginDescription(file);
++        }
++        try {
++            return future.join();
++        } catch (java.util.concurrent.CompletionException ex) {
++            if (ex.getCause() instanceof InvalidDescriptionException ide) {
++                throw ide;
++            }
++            if (ex.getCause() instanceof RuntimeException re) {
++                throw re;
++            }
++            throw ex;
++        }
++    }
++
+     @NotNull
+     public Plugin[] loadPlugins(@NotNull File[] files) {
+         Preconditions.checkArgument(files != null, "File list cannot be null");
+@@ -141,7 +160,8 @@ public final class SimplePluginManager implements PluginManager {
+         Map<String, Collection<String>> dependencies = new HashMap<String, Collection<String>>();
+         Map<String, Collection<String>> softDependencies = new HashMap<String, Collection<String>>();
+ 
+-        // This is where it figures out all possible plugins
++        // Tachyon start - plugin.yml aller Jars parallel lesen (Reihenfolge und Fehlermeldungen bleiben gleich)
++        Map<File, PluginLoader> fileLoaders = new java.util.LinkedHashMap<>();
+         for (File file : files) {
+             PluginLoader loader = null;
+             for (Pattern filter : filters) {
+@@ -150,12 +170,36 @@ public final class SimplePluginManager implements PluginManager {
+                     loader = fileAssociations.get(filter);
+                 }
+             }
++            if (loader != null) {
++                fileLoaders.put(file, loader);
++            }
++        }
++        Map<File, java.util.concurrent.CompletableFuture<PluginDescriptionFile>> descriptionFutures = new HashMap<>();
++        if (fileLoaders.size() > 1) {
++            for (Map.Entry<File, PluginLoader> entry : fileLoaders.entrySet()) {
++                final PluginLoader loader = entry.getValue();
++                final File file = entry.getKey();
++                descriptionFutures.put(file, java.util.concurrent.CompletableFuture.supplyAsync(() -> {
++                    try {
++                        return loader.getPluginDescription(file);
++                    } catch (InvalidDescriptionException ex) {
++                        throw new java.util.concurrent.CompletionException(ex);
++                    }
++                }));
++            }
++        }
++        List<PluginDescriptionFile> foundDescriptions = new ArrayList<>();
++        // Tachyon end
++
++        // This is where it figures out all possible plugins
++        for (File file : files) {
++            PluginLoader loader = fileLoaders.get(file); // Tachyon
+ 
+             if (loader == null) continue;
+ 
+             PluginDescriptionFile description = null;
+             try {
+-                description = loader.getPluginDescription(file);
++                description = awaitDescription(descriptionFutures.get(file), loader, file); // Tachyon
+                 String name = description.getName();
+                 if (name.equalsIgnoreCase("bukkit") || name.equalsIgnoreCase("minecraft") || name.equalsIgnoreCase("mojang")) {
+                     server.getLogger().log(Level.SEVERE, "Could not load '" + file.getPath() + "': Restricted Name");
+@@ -169,6 +213,7 @@ public final class SimplePluginManager implements PluginManager {
+                 continue;
+             }
+ 
++            foundDescriptions.add(description); // Tachyon
+             File replacedFile = plugins.put(description.getName(), file);
+             if (replacedFile != null) {
+                 server.getLogger().severe(String.format(
+@@ -250,6 +295,13 @@ public final class SimplePluginManager implements PluginManager {
+             }
+         }
+ 
++        // Tachyon - Bibliotheken (plugin.yml "libraries:") aller Plugins schon jetzt parallel aufloesen
++        for (PluginLoader pluginLoader : new HashSet<>(fileLoaders.values())) {
++            if (pluginLoader instanceof org.bukkit.plugin.java.JavaPluginLoader javaPluginLoader) {
++                javaPluginLoader.prefetchLibraries(foundDescriptions);
++            }
++        }
++
+         while (!plugins.isEmpty()) {
+             boolean missingDependency = true;
+             Iterator<Map.Entry<String, File>> pluginIterator = plugins.entrySet().iterator();
+diff --git a/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java b/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
+index 29a8efdf..ba2e40eb 100644
+--- a/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
++++ b/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
+@@ -154,6 +154,19 @@ public final class JavaPluginLoader implements PluginLoader {
+         return loader.plugin;
+     }
+ 
++    /**
++     * Tachyon: loest die Bibliotheken aller Plugins parallel im Hintergrund auf,
++     * bevor die Plugins nacheinander geladen werden.
++     *
++     * @param descriptions Beschreibungen der Plugins, die gleich geladen werden
++     */
++    @org.jetbrains.annotations.ApiStatus.Internal
++    public void prefetchLibraries(@NotNull java.util.Collection<PluginDescriptionFile> descriptions) {
++        if (libraryLoader != null) {
++            libraryLoader.prefetch(descriptions);
++        }
++    }
++
+     @Override
+     @NotNull
+     public PluginDescriptionFile getPluginDescription(@NotNull File file) throws InvalidDescriptionException {
+diff --git a/src/main/java/org/bukkit/plugin/java/LibraryLoader.java b/src/main/java/org/bukkit/plugin/java/LibraryLoader.java
+index 0b9f8bfb..85d1561d 100644
+--- a/src/main/java/org/bukkit/plugin/java/LibraryLoader.java
++++ b/src/main/java/org/bukkit/plugin/java/LibraryLoader.java
+@@ -7,7 +7,13 @@ import java.net.URL;
+ import java.net.URLClassLoader;
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collection;
+ import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
+ import java.util.logging.Level;
+ import java.util.logging.Logger;
+ import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
+@@ -44,6 +50,14 @@ class LibraryLoader
+     private final RepositorySystem repository;
+     private final DefaultRepositorySystemSession session;
+     private final List<RemoteRepository> repositories;
++    // Tachyon - Bibliotheken aller Plugins parallel vorab aufloesen/herunterladen statt nacheinander
++    private final ConcurrentHashMap<String, CompletableFuture<List<URL>>> prefetched = new ConcurrentHashMap<>();
++    private static final ExecutorService PREFETCH_POOL = Executors.newFixedThreadPool( Math.max( 2, Math.min( 8, Runtime.getRuntime().availableProcessors() ) ), r ->
++    {
++        Thread t = new Thread( r, "Tachyon-Library-Prefetch" );
++        t.setDaemon( true );
++        return t;
++    } );
+ 
+     public LibraryLoader(@NotNull Logger logger)
+     {
+@@ -76,6 +90,18 @@ class LibraryLoader
+         this.repositories = repository.newResolutionRepositories( session, Arrays.asList( new RemoteRepository.Builder( "central", "default", System.getProperty( REPOSITORY_PROPERTY, "https://repo.maven.apache.org/maven2" ) ).build() ) );
+     }
+ 
++    // Tachyon start
++    void prefetch(@NotNull Collection<PluginDescriptionFile> descriptions)
++    {
++        for ( PluginDescriptionFile desc : descriptions )
++        {
++            if ( !desc.getLibraries().isEmpty() )
++            {
++                prefetched.computeIfAbsent( desc.getName(), name -> CompletableFuture.supplyAsync( () -> resolve( desc ), PREFETCH_POOL ) );
++            }
++        }
++    }
++
+     @Nullable
+     public ClassLoader createLoader(@NotNull PluginDescriptionFile desc)
+     {
+@@ -83,10 +109,33 @@ class LibraryLoader
+         {
+             return null;
+         }
++        List<URL> jarFiles = null;
++        CompletableFuture<List<URL>> future = prefetched.remove( desc.getName() );
++        if ( future != null )
++        {
++            try
++            {
++                jarFiles = future.join();
++            } catch ( CompletionException ex )
++            {
++                jarFiles = null; // Fallback: wie bisher direkt aufloesen (liefert dann auch die normale Fehlermeldung)
++            }
++        }
++        if ( jarFiles == null )
++        {
++            jarFiles = resolve( desc );
++        }
++        return new URLClassLoader( jarFiles.toArray( new URL[ jarFiles.size() ] ), getClass().getClassLoader() );
++    }
++
++    @NotNull
++    private List<URL> resolve(@NotNull PluginDescriptionFile desc)
++    {
+         logger.log( Level.INFO, "[{0}] Loading {1} libraries... please wait", new Object[]
+         {
+             desc.getName(), desc.getLibraries().size()
+         } );
++    // Tachyon end
+ 
+         List<Dependency> dependencies = new ArrayList<>();
+         for ( String library : desc.getLibraries() )
+@@ -127,8 +176,6 @@ class LibraryLoader
+             } );
+         }
+ 
+-        URLClassLoader loader = new URLClassLoader( jarFiles.toArray( new URL[ jarFiles.size() ] ), getClass().getClassLoader() );
+-
+-        return loader;
++        return jarFiles; // Tachyon
+     }
+ }

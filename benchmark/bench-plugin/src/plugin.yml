@@ -1,0 +1,9 @@
+name: TachyonBench
+version: 1.0
+main: dev.tachyon.bench.BenchPlugin
+api-version: '26.3'
+description: Mess-Plugin fuer benchmark.py (nur fuer Testserver)
+commands:
+  bench:
+    description: Benchmark-Messungen
+    permission: tachyonbench.use

@@ -1,0 +1,2452 @@
+diff --git a/src/main/java/dev/tachyon/Tachyon.java b/src/main/java/dev/tachyon/Tachyon.java
+new file mode 100644
+index 000000000..60f72ddb8
+--- /dev/null
++++ b/src/main/java/dev/tachyon/Tachyon.java
+@@ -0,0 +1,33 @@
++package dev.tachyon;
++
++/**
++ * Zentrale Stelle fuer das Branding von Tachyon.
++ * Zum Umbenennen reicht es, NAME zu aendern.
++ */
++public final class Tachyon {
++
++    /** Name, der im F3-Menue, in der Serverliste, bei /version und im Log erscheint. */
++    public static final String NAME = "Tachyon";
++
++    /** Minecraft-Version, auf der diese Tachyon-Version basiert. */
++    public static final String MC_VERSION = "26.3";
++
++    /**
++     * MOTD in der Serverliste (2 Zeilen, Minecraft-Farbcodes).
++     * Zeile 1: "Powered by TACHYON" mit Blitzen, Zeile 2: was Tachyon ausmacht.
++     */
++    public static final String DEFAULT_MOTD =
++            "\u00A7d\u00A7l\u26A1 \u00A7b\u00A7lPowered by \u00A7d\u00A7l" + NAME.toUpperCase(java.util.Locale.ROOT) + " \u00A7d\u00A7l\u26A1"
++            + "\n\u00A78\u00BB \u00A7aKeine Lags \u00A78\u2502 \u00A7bTurbo-Start \u00A78\u2502 \u00A7eWorld-Manager";
++
++    /** Unveraenderte Vanilla-MOTD (oder die alte schlichte Tachyon-MOTD) automatisch durch die Tachyon-MOTD ersetzen. */
++    public static String motd(String configured) {
++        if (configured == null || configured.isEmpty() || "A Minecraft Server".equals(configured) || ("Powered by " + NAME).equals(configured)) {
++            return DEFAULT_MOTD;
++        }
++        return configured;
++    }
++
++    private Tachyon() {
++    }
++}
+diff --git a/src/main/java/dev/tachyon/console/TachyonConsole.java b/src/main/java/dev/tachyon/console/TachyonConsole.java
+new file mode 100644
+index 000000000..4653472cb
+--- /dev/null
++++ b/src/main/java/dev/tachyon/console/TachyonConsole.java
+@@ -0,0 +1,443 @@
++package dev.tachyon.console;
++
++import dev.tachyon.Tachyon;
++import java.io.PrintStream;
++import java.lang.management.ManagementFactory;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Locale;
++import java.util.StringJoiner;
++import java.util.concurrent.CountDownLatch;
++import org.bukkit.Bukkit;
++import org.bukkit.World;
++import org.bukkit.plugin.Plugin;
++
++/**
++ * Moderne Konsolenausgabe von Tachyon.
++ *
++ * Beim Start: Banner, EIN Ladebalken, der sich selbst aktualisiert, und keine INFO-Flut - nur Warnungen
++ * und Fehler erscheinen. Alles landet trotzdem vollstaendig in logs/latest.log. Am Ende eine Zusammenfassung.
++ * Danach normale (eingefaerbte) Log-Ausgabe.
++ *
++ * Kostet im laufenden Betrieb nichts: der Ladebalken existiert nur waehrend des Starts.
++ * Schalter: -Dtachyon.verboseStartup=true (altes ausfuehrliches Log), -Dtachyon.noColor=true (keine Farben).
++ */
++public final class TachyonConsole {
++
++    public static final String RESET = "\u001B[0m";
++    public static final String DIM = "\u001B[90m";
++    public static final String BOLD = "\u001B[1m";
++    public static final String CYAN = "\u001B[96m";
++    public static final String GREEN = "\u001B[92m";
++    public static final String YELLOW = "\u001B[93m";
++    public static final String RED = "\u001B[91m";
++    public static final String MAGENTA = "\u001B[95m";
++    public static final String BLUE = "\u001B[94m";
++    private static final String CLEAR_LINE = "\r\u001B[2K";
++
++    private static final String[] LOGO = {
++        " _____  _    ____ _   ___   _____  _   _ ",
++        "|_   _|/ \\  / ___| | | \\ \\ / / _ \\| \\ | |",
++        "  | | / _ \\| |   | |_| |\\ V / | | |  \\| |",
++        "  | |/ ___ \\ |___|  _  | | || |_| | |\\  |",
++        "  |_/_/   \\_\\____|_| |_| |_| \\___/|_| \\_|",
++    };
++    /** Farbverlauf Cyan -> Blau -> Magenta (256 Farben). */
++    private static final int[] GRADIENT = {51, 45, 39, 63, 135};
++
++    private static final PrintStream OUT = System.out; // vor jeder Umleitung durch Minecraft/Bukkit
++    private static final boolean COLOR = detectColor();
++    /** Echtes Terminal: Zeile kann ueberschrieben werden, Unicode/Farben moeglich. */
++    private static final boolean INTERACTIVE = COLOR;
++    private static final boolean VERBOSE = Boolean.getBoolean("tachyon.verboseStartup");
++    private static final String SEP = INTERACTIVE ? "  \u00B7  " : "  |  ";
++
++    private static final Object LOCK = new Object();
++    private static final CountDownLatch STARTUP_DONE = new CountDownLatch(1);
++    private static volatile boolean startupActive = true;
++    private static volatile boolean loggerMode;
++    private static String barLine = "";
++    private static String lastPhase = "";
++    private static int warnings;
++    private static int errors;
++
++    static {
++        if (VERBOSE) {
++            System.setProperty("tachyon.startupLevel", "INFO"); // vor der log4j-Initialisierung, siehe log4j2.xml
++        }
++    }
++
++    private TachyonConsole() {
++    }
++
++    private static org.apache.logging.log4j.Logger log() {
++        return org.apache.logging.log4j.LogManager.getLogger("Tachyon");
++    }
++
++    private static boolean detectColor() {
++        if (Boolean.getBoolean("tachyon.noColor") || System.getenv("NO_COLOR") != null) {
++            return false;
++        }
++        java.io.Console console = System.console();
++        if (console == null || !console.isTerminal()) {
++            return false; // Pipe / Hosting-Panel / Datei
++        }
++        if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) {
++            return true;
++        }
++        // Windows: Windows Terminal (Standard unter Windows 11) und VS Code koennen ANSI immer
++        if (System.getenv("WT_SESSION") != null || "vscode".equals(System.getenv("TERM_PROGRAM")) || System.getenv("ANSICON") != null) {
++            return true;
++        }
++        // Klassisches Konsolenfenster (conhost): ANSI-Verarbeitung selbst einschalten
++        return enableWindowsVirtualTerminal();
++    }
++
++    /** Schaltet in der klassischen Windows-Konsole die ANSI-Verarbeitung ein (ENABLE_VIRTUAL_TERMINAL_PROCESSING). */
++    private static boolean enableWindowsVirtualTerminal() {
++        try {
++            com.sun.jna.platform.win32.Kernel32 kernel = com.sun.jna.platform.win32.Kernel32.INSTANCE;
++            com.sun.jna.platform.win32.WinNT.HANDLE out = kernel.GetStdHandle(com.sun.jna.platform.win32.Wincon.STD_OUTPUT_HANDLE);
++            com.sun.jna.ptr.IntByReference mode = new com.sun.jna.ptr.IntByReference();
++            if (!kernel.GetConsoleMode(out, mode)) {
++                return false;
++            }
++            int current = mode.getValue();
++            return (current & 0x0004) != 0 || kernel.SetConsoleMode(out, current | 0x0004);
++        } catch (Throwable t) {
++            return false; // kein JNA / keine echte Konsole: dann eben ohne Farben
++        }
++    }
++
++    private static String c(String code) {
++        return COLOR ? code : "";
++    }
++
++    private static double uptimeSeconds() {
++        return ManagementFactory.getRuntimeMXBean().getUptime() / 1000.0;
++    }
++
++    public static boolean isStartupActive() {
++        return startupActive && !VERBOSE;
++    }
++
++    // ------------------------------------------------------------------ Banner + Ladebalken
++
++    /** Ganz am Anfang, noch bevor Minecraft geladen wird. */
++    public static void banner() {
++        Runtime rt = Runtime.getRuntime();
++        OUT.println();
++        for (int i = 0; i < LOGO.length; i++) {
++            OUT.println("   " + (COLOR ? "\u001B[1;38;5;" + GRADIENT[i] + "m" : "") + LOGO[i] + c(RESET));
++        }
++        OUT.println();
++        OUT.println("   " + c(BOLD) + Tachyon.NAME + " " + Tachyon.MC_VERSION + c(RESET) + c(DIM)
++                + SEP + "Minecraft-Server ohne Lags" + SEP + "Java " + Runtime.version().feature()
++                + SEP + formatMb(rt.maxMemory()) + " RAM" + SEP + rt.availableProcessors() + " Threads" + c(RESET));
++        OUT.println();
++        progress(0.05, "Java gestartet");
++    }
++
++    /** Fortschritt melden (0..1). Im Terminal wird dieselbe Zeile ueberschrieben. */
++    public static void progress(double fraction, String label) {
++        if (VERBOSE) {
++            stepLine(fraction, label);
++            return;
++        }
++        if (!startupActive) {
++            return;
++        }
++        synchronized (LOCK) {
++            barLine = renderBar(fraction, label);
++            if (INTERACTIVE) {
++                OUT.print(CLEAR_LINE + barLine);
++                OUT.flush();
++            } else {
++                // Pipes/Panels koennen keine Zeile ueberschreiben: nur Hauptphasen als eigene Zeile
++                String phase = label.contains(":") ? label.substring(0, label.indexOf(':')) : label;
++                if (!phase.equals(lastPhase)) {
++                    lastPhase = phase;
++                    OUT.println(barLine);
++                }
++            }
++        }
++    }
++
++    /** Hauptphasen des Starts. */
++    public static void step(String name) {
++        double f = switch (name) {
++            case "Minecraft-Kern geladen" -> 0.35;
++            case "Konfiguration & Datapacks" -> 0.50;
++            case "Plugins geladen" -> 0.75;
++            case "Welten geladen" -> 0.97;
++            default -> 0.05;
++        };
++        progress(f, name);
++    }
++
++    /** Unterschritt innerhalb einer Phase, z.B. Plugin 3 von 12 (von..bis = Anteil am Gesamtbalken). */
++    public static void subProgress(double from, double to, int index, int total, String label) {
++        double f = total <= 0 ? to : from + (to - from) * index / (double) total;
++        progress(f, label);
++    }
++
++    private static String renderBar(double fraction, String label) {
++        int width = 30;
++        double f = Math.max(0, Math.min(1, fraction));
++        int filled = (int) Math.round(width * f);
++        String full = INTERACTIVE ? "\u2588" : "#";
++        String empty = INTERACTIVE ? "\u2591" : "-";
++        String text = label.length() > 42 ? label.substring(0, 41) + "~" : label;
++        return "   " + c(CYAN) + full.repeat(filled) + c(DIM) + empty.repeat(width - filled) + c(RESET)
++                + c(BOLD) + String.format(" %3d%%", Math.round(f * 100)) + c(RESET) + "  " + text
++                + c(DIM) + String.format(Locale.GERMANY, "  %.1f s", uptimeSeconds()) + c(RESET);
++    }
++
++    /** Ausfuehrlicher Modus: jede Phase als Log-Zeile. */
++    private static void stepLine(double fraction, String label) {
++        String line = String.format(Locale.GERMANY, "[%3d%%] %s (%.1f s)", Math.round(fraction * 100), label, uptimeSeconds());
++        if (loggerMode) {
++            log().info(line);
++        } else {
++            OUT.println("   " + line);
++        }
++    }
++
++    /**
++     * Vom Konsolen-Thread fuer jede Log-Zeile aufgerufen, solange der Start laeuft.
++     * @return true, wenn die Zeile hier behandelt wurde (INFO verschluckt, WARN/FEHLER ueber dem Balken ausgegeben)
++     */
++    public static boolean handleStartupLine(String raw, boolean color) {
++        if (!isStartupActive()) {
++            return false;
++        }
++        String[] p = raw.split("\t", 4);
++        String level = p.length >= 2 ? p[1] : "INFO";
++        boolean warn = level.equals("WARN");
++        boolean error = level.equals("ERROR") || level.equals("FATAL");
++        if (!warn && !error) {
++            return true; // INFO/DEBUG beim Start nur ins Logfile
++        }
++        synchronized (LOCK) {
++            if (warn) {
++                warnings++;
++            } else {
++                errors++;
++            }
++            String line = formatLine(raw, color).stripTrailing();
++            if (INTERACTIVE) {
++                OUT.print(CLEAR_LINE + line + System.lineSeparator() + barLine);
++            } else {
++                OUT.println(line);
++            }
++            OUT.flush();
++        }
++        return true;
++    }
++
++    /** Vom Konsolen-Thread, sobald er laeuft. */
++    public static void consoleReady() {
++        loggerMode = true;
++    }
++
++    /** Die Konsolen-Eingabe wartet, bis der Start fertig ist (sonst zerreisst der Prompt den Ladebalken). */
++    public static void awaitStartup() {
++        if (VERBOSE) {
++            return;
++        }
++        try {
++            STARTUP_DONE.await();
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        }
++    }
++
++    /** Falls der Start abbricht oder der Server stoppt: Konsole wieder normal benutzen. */
++    public static void abortStartup() {
++        if (startupActive) {
++            synchronized (LOCK) {
++                if (INTERACTIVE && !VERBOSE) {
++                    OUT.println();
++                }
++                startupActive = false;
++            }
++            STARTUP_DONE.countDown();
++        }
++    }
++
++    // ------------------------------------------------------------------ Zusammenfassung
++
++    /** Nach "Done": Balken auf 100 %, dann Zusammenfassung, was geladen wurde. */
++    public static void ready(int port) {
++        progress(1.0, "Bereit");
++        double secs = uptimeSeconds();
++        Runtime rt = Runtime.getRuntime();
++
++        List<String> lines = new ArrayList<>();
++        lines.add(String.format(Locale.GERMANY, "%s %s ist bereit  -  gestartet in %.1f s", Tachyon.NAME.toUpperCase(Locale.ROOT), Tachyon.MC_VERSION, secs));
++        lines.add("");
++        lines.add("Port        " + port + SEP + Bukkit.getMaxPlayers() + " Slots" + SEP + (Bukkit.getOnlineMode() ? "Online-Modus" : "Offline-Modus")
++                + SEP + "Whitelist " + (Bukkit.hasWhitelist() ? "an" : "aus"));
++        StringJoiner worlds = new StringJoiner(", ");
++        for (World w : Bukkit.getWorlds()) {
++            worlds.add(w.getName());
++        }
++        lines.add("Welten      " + worlds);
++        Plugin[] plugins = Bukkit.getPluginManager().getPlugins();
++        if (plugins.length == 0) {
++            lines.add("Plugins     keine (World-Manager ist eingebaut: /wm)");
++        } else {
++            StringJoiner pl = new StringJoiner(", ");
++            int disabled = 0;
++            for (Plugin plugin : plugins) {
++                if (plugin.isEnabled()) {
++                    pl.add(plugin.getName() + " " + plugin.getDescription().getVersion());
++                } else {
++                    disabled++;
++                }
++            }
++            lines.add("Plugins     " + (plugins.length - disabled) + " aktiv" + (disabled > 0 ? ", " + disabled + " FEHLGESCHLAGEN" : ""));
++            for (String chunk : wrap(pl.toString(), 70)) {
++                lines.add("            " + chunk);
++            }
++        }
++        lines.add("System      Java " + Runtime.version().feature() + SEP + rt.availableProcessors() + " Threads" + SEP
++                + formatMb(rt.totalMemory() - rt.freeMemory()) + " von " + formatMb(rt.maxMemory()) + " RAM belegt");
++        String problems = (warnings == 0 && errors == 0) ? "keine Warnungen oder Fehler"
++                : warnings + " Warnung(en), " + errors + " Fehler (Details in logs/latest.log)";
++        lines.add("Start       " + problems);
++        lines.add("");
++        lines.add("Befehle     /wm  (Welten)" + SEP + "/tps" + SEP + "/stop");
++
++        int w = 0;
++        for (String l : lines) {
++            w = Math.max(w, l.length());
++        }
++        String h = (INTERACTIVE ? "\u2500" : "-").repeat(w + 2);
++        String v = INTERACTIVE ? "\u2502" : "|";
++        String border = (errors > 0) ? RED : (warnings > 0 ? YELLOW : GREEN);
++        String nl = System.lineSeparator();
++        StringBuilder sb = new StringBuilder();
++        sb.append(nl).append(nl);
++        sb.append("   ").append(c(border)).append(INTERACTIVE ? "\u250C" : "+").append(h).append(INTERACTIVE ? "\u2510" : "+").append(c(RESET)).append(nl);
++        for (int i = 0; i < lines.size(); i++) {
++            String l = lines.get(i);
++            String body = (i == 0) ? c(BOLD) + c(border) + l + c(RESET) : colorLabel(l);
++            sb.append("   ").append(c(border)).append(v).append(c(RESET)).append(' ').append(body).append(" ".repeat(w - l.length()))
++                    .append(' ').append(c(border)).append(v).append(c(RESET)).append(nl);
++        }
++        sb.append("   ").append(c(border)).append(INTERACTIVE ? "\u2514" : "+").append(h).append(INTERACTIVE ? "\u2518" : "+").append(c(RESET)).append(nl);
++
++        synchronized (LOCK) {
++            if (VERBOSE) {
++                for (String l : lines) {
++                    log().info(l);
++                }
++            } else {
++                OUT.print(sb);
++                OUT.flush();
++            }
++            startupActive = false;
++        }
++        STARTUP_DONE.countDown();
++    }
++
++    private static String colorLabel(String l) {
++        if (!COLOR || l.length() < 12 || l.isBlank()) {
++            return l;
++        }
++        String label = l.substring(0, 12);
++        String rest = l.substring(12);
++        if (rest.contains("FEHLGESCHLAGEN") || rest.contains(" Fehler (")) {
++            rest = YELLOW + rest + RESET;
++        }
++        return DIM + label + RESET + rest;
++    }
++
++    private static List<String> wrap(String text, int width) {
++        List<String> out = new ArrayList<>();
++        StringBuilder line = new StringBuilder();
++        for (String word : text.split(" ")) {
++            if (line.length() + word.length() + 1 > width && line.length() > 0) {
++                out.add(line.toString());
++                line.setLength(0);
++            }
++            if (line.length() > 0) {
++                line.append(' ');
++            }
++            line.append(word);
++        }
++        if (line.length() > 0) {
++            out.add(line.toString());
++        }
++        return out;
++    }
++
++    private static String formatMb(long bytes) {
++        long mb = bytes / (1024 * 1024);
++        return mb >= 1024 ? String.format(Locale.GERMANY, "%.1f GB", mb / 1024.0) : mb + " MB";
++    }
++
++    // ------------------------------------------------------------------ Einfaerben der Log-Zeilen (nach dem Start)
++
++    /**
++     * Formatiert eine Log-Zeile fuer die Konsole. raw = "HH:mm:ss\tLEVEL\tThread\tNachricht".
++     * Nur String-Operationen auf der fertigen Zeile, im Konsolen-Thread - der Server-Thread merkt davon nichts.
++     */
++    public static String formatLine(String raw, boolean color) {
++        String[] p = raw.split("\t", 4);
++        if (p.length < 4) {
++            return raw;
++        }
++        String time = p[0];
++        String level = p[1];
++        String thread = p[2];
++        String msg = p[3];
++        if (!color) {
++            return "[" + time + "] [" + thread + "/" + level + "]: " + msg; // klassisches Format (Pipes, Panels)
++        }
++        StringBuilder sb = new StringBuilder(msg.length() + 48);
++        sb.append(DIM).append(time).append(RESET).append(' ');
++        switch (level) {
++            case "WARN" -> sb.append(YELLOW).append(BOLD).append("WARN ").append(RESET);
++            case "ERROR", "FATAL" -> sb.append(RED).append(BOLD).append("FEHL ").append(RESET);
++            case "DEBUG", "TRACE" -> sb.append(DIM).append("DEBUG").append(RESET);
++            default -> sb.append(DIM).append("\u2502    ").append(RESET);
++        }
++        sb.append(' ');
++        if (!"Server thread".equals(thread)) {
++            sb.append(DIM).append('[').append(thread).append("] ").append(RESET);
++        }
++        sb.append(colorMessage(level, msg)).append(RESET);
++        return sb.toString();
++    }
++
++    private static String colorMessage(String level, String msg) {
++        if (level.equals("WARN")) {
++            return YELLOW + msg;
++        }
++        if (level.equals("ERROR") || level.equals("FATAL")) {
++            return RED + msg;
++        }
++        if (msg.startsWith("Done (")) {
++            return GREEN + BOLD + msg;
++        }
++        if (msg.contains(" joined the game")) {
++            return GREEN + "\u25B6 " + msg;
++        }
++        if (msg.contains(" left the game")) {
++            return YELLOW + "\u25C0 " + msg;
++        }
++        if (msg.contains(" issued server command: ")) {
++            return MAGENTA + msg;
++        }
++        if (msg.startsWith("[WorldManager]") || msg.startsWith("[Tachyon]")) {
++            int close = msg.indexOf(']');
++            return CYAN + BOLD + msg.substring(0, close + 1) + RESET + CYAN + msg.substring(close + 1);
++        }
++        if (msg.startsWith("<")) {
++            return BLUE + msg; // Chat
++        }
++        return msg;
++    }
++}
+diff --git a/src/main/java/dev/tachyon/world/VoidGenerator.java b/src/main/java/dev/tachyon/world/VoidGenerator.java
+new file mode 100644
+index 000000000..052d7bf9b
+--- /dev/null
++++ b/src/main/java/dev/tachyon/world/VoidGenerator.java
+@@ -0,0 +1,45 @@
++package dev.tachyon.world;
++
++import java.util.Random;
++import org.bukkit.Location;
++import org.bukkit.Material;
++import org.bukkit.World;
++import org.bukkit.generator.ChunkGenerator;
++import org.bukkit.generator.WorldInfo;
++
++/**
++ * Leere Welt (Void). Erzeugt keinerlei Blöcke, der Spawn ist fest auf 0/64/0,
++ * dadurch muss nie ein Spawnpunkt gesucht werden. Unter dem Spawn liegt ein Bedrock-Block.
++ */
++public final class VoidGenerator extends ChunkGenerator {
++
++    @Override
++    public boolean shouldGenerateNoise() { return false; }
++
++    @Override
++    public boolean shouldGenerateSurface() { return false; }
++
++    @Override
++    public boolean shouldGenerateCaves() { return false; }
++
++    @Override
++    public boolean shouldGenerateDecorations() { return false; }
++
++    @Override
++    public boolean shouldGenerateMobs() { return false; }
++
++    @Override
++    public boolean shouldGenerateStructures() { return false; }
++
++    @Override
++    public void generateSurface(WorldInfo worldInfo, Random random, int chunkX, int chunkZ, ChunkData chunkData) {
++        if (chunkX == 0 && chunkZ == 0) {
++            chunkData.setBlock(0, 63, 0, Material.BEDROCK);
++        }
++    }
++
++    @Override
++    public Location getFixedSpawnLocation(World world, Random random) {
++        return new Location(world, 0.5, 64, 0.5);
++    }
++}
+diff --git a/src/main/java/dev/tachyon/world/WorldManager.java b/src/main/java/dev/tachyon/world/WorldManager.java
+new file mode 100644
+index 000000000..8e6954458
+--- /dev/null
++++ b/src/main/java/dev/tachyon/world/WorldManager.java
+@@ -0,0 +1,814 @@
++package dev.tachyon.world;
++
++import java.io.File;
++import java.io.IOException;
++import java.nio.file.FileVisitResult;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.SimpleFileVisitor;
++import java.nio.file.StandardCopyOption;
++import java.nio.file.attribute.BasicFileAttributes;
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Deque;
++import java.util.HashMap;
++import java.util.IdentityHashMap;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.Set;
++import java.util.TreeSet;
++import java.util.concurrent.ConcurrentLinkedQueue;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.function.Consumer;
++import java.util.logging.Level;
++import java.util.logging.Logger;
++import java.util.regex.Pattern;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.level.PlayerSpawnFinder;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.TicketType;
++import net.minecraft.world.level.ChunkPos;
++import org.bukkit.Bukkit;
++import org.bukkit.Location;
++import org.bukkit.World;
++import org.bukkit.WorldCreator;
++import org.bukkit.WorldType;
++import org.bukkit.configuration.ConfigurationSection;
++import org.bukkit.configuration.file.YamlConfiguration;
++import org.bukkit.craftbukkit.CraftWorld;
++import org.bukkit.entity.Player;
++
++/**
++ * Tachyon World-Manager.
++ *
++ * Vanilla/Spigot erzeugt neue Welten komplett auf dem Main-Thread: Der Spawnpunkt wird
++ * in einer 11x11-Chunk-Spirale gesucht und jeder Chunk dabei synchron generiert. Waehrenddessen
++ * tickt der Server nicht, alle Spieler frieren ein.
++ *
++ * Der World-Manager legt die Welt sofort an (provisorischer Spawn, keine Chunk-Generierung auf
++ * dem Main-Thread) und sucht den Spawn danach Chunk fuer Chunk ueber Tickets - die eigentliche
++ * Generierung laeuft auf den Worldgen-Threads. Erst wenn der Spawnbereich fertig ist, gilt die
++ * Welt als "bereit" und wartende Teleports werden ausgefuehrt.
++ */
++public final class WorldManager {
++
++    public static final Pattern VALID_NAME = Pattern.compile("[A-Za-z0-9_\\-]{1,64}");
++    private static final int SPAWN_SEARCH_RADIUS = 5; // wie Vanilla: 11x11 Chunks
++
++    private static WorldManager instance;
++    /** >0 solange der World-Manager selbst gerade createWorld aufruft (nur Main-Thread). */
++    private static int managerDepth;
++
++    private final Logger logger = Logger.getLogger("Tachyon");
++    private final File configFile;
++    private YamlConfiguration config;
++
++    private final Map<String, LoadState> states = new HashMap<>();
++    private final Set<ServerLevel> provisionalSpawn = Collections.newSetFromMap(new IdentityHashMap<>());
++    private final ConcurrentLinkedQueue<Runnable> mainQueue = new ConcurrentLinkedQueue<>();
++    private final Deque<String> autoloadQueue = new ArrayDeque<>();
++    private final ExecutorService io = Executors.newSingleThreadExecutor(r -> {
++        Thread t = new Thread(r, "Tachyon-World-IO");
++        t.setDaemon(true);
++        return t;
++    });
++
++    private static final boolean AOT_TRAINING = Boolean.getBoolean("tachyon.aotTraining");
++    private boolean started;
++    private int ticks;
++    private int trainingTicks;
++
++    // Einstellungen
++    private boolean fastForPlugins;
++    private boolean fastStartup;
++    private int preloadRadius;
++    private int autoloadInterval;
++    private int pregenParallel;
++
++    // Pregenerator
++    private PregenTask pregen;
++    private long lastTickNanos;
++
++    private WorldManager(File configFile) {
++        this.configFile = configFile;
++        reloadConfig();
++    }
++
++    // ------------------------------------------------------------------ statische Hooks (Server-Kern)
++
++    public static void init(File configFile) {
++        if (instance == null) {
++            instance = new WorldManager(configFile);
++        }
++    }
++
++    public static WorldManager get() {
++        return instance;
++    }
++
++    /**
++     * Wird von MinecraftServer#setInitialSpawn / #prepareLevels abgefragt.
++     * true = keine synchrone Spawnsuche und kein blockierendes Warten auf Chunks.
++     */
++    public static boolean isFastLoading() {
++        if (managerDepth > 0) {
++            return true;
++        }
++        WorldManager wm = instance;
++        if (wm == null) {
++            return false;
++        }
++        // Beim Serverstart (vor dem ersten Tick) gilt startup.fast-start, danach die Plugin-Einstellung.
++        return wm.started ? wm.fastForPlugins : wm.fastStartup;
++    }
++
++    /** Kern-Hook: Spawn wurde nur provisorisch gesetzt und muss asynchron gesucht werden. */
++    public static void markProvisionalSpawn(ServerLevel level) {
++        WorldManager wm = instance;
++        if (wm == null) {
++            return;
++        }
++        wm.provisionalSpawn.add(level);
++        wm.setPendingSpawn(level.getWorld().getName(), true); // falls der Server vor Ende der Suche stoppt
++        if (managerDepth == 0) {
++            // Von einem Plugin erzeugt: Spawn im naechsten Tick im Hintergrund aufloesen.
++            wm.mainQueue.add(() -> {
++                if (wm.provisionalSpawn.remove(level)) {
++                    wm.resolveSpawn(level.getWorld(), null);
++                }
++            });
++        }
++    }
++
++    /** Kern-Hook: einmal pro Server-Tick auf dem Main-Thread. */
++    public static void tickHook() {
++        WorldManager wm = instance;
++        if (wm != null) {
++            wm.tick();
++        }
++    }
++
++    public static void shutdown() {
++        WorldManager wm = instance;
++        if (wm != null) {
++            wm.io.shutdown();
++        }
++    }
++
++    // ------------------------------------------------------------------ Konfiguration
++
++    public void reloadConfig() {
++        config = YamlConfiguration.loadConfiguration(configFile);
++        config.options().setHeader(List.of(
++                "Tachyon Konfiguration",
++                "",
++                "startup.fast-start:",
++                "  true = der Server wartet beim Start nicht auf die Spawnsuche/Spawn-Chunks, sondern erledigt das",
++                "  in den ersten Sekunden nach 'Done' im Hintergrund. Spieler finden trotzdem einen sicheren Spawn.",
++                "world-manager.fast-world-creation-for-plugins:",
++                "  true = auch Welten, die Plugins (z.B. Multiverse) erstellen, werden ohne Server-Haenger angelegt.",
++                "  Der Spawnpunkt wird dann kurz nach dem Erstellen im Hintergrund gesucht.",
++                "world-manager.spawn-preload-radius: Chunks um den Spawn, die vor 'bereit' geladen werden.",
++                "world-manager.autoload-interval-ticks: Abstand zwischen zwei Welten beim automatischen Laden nach dem Start.",
++                "world-manager.pregen-parallel-chunks: so viele Chunks generiert /wm pregen gleichzeitig (pausiert automatisch bei Lag).",
++                "worlds: wird vom /wm Befehl verwaltet."));
++        config.addDefault("startup.fast-start", true);
++        config.addDefault("world-manager.fast-world-creation-for-plugins", false);
++        config.addDefault("world-manager.spawn-preload-radius", 2);
++        config.addDefault("world-manager.autoload-interval-ticks", 20);
++        config.addDefault("world-manager.pregen-parallel-chunks", Math.max(4, Runtime.getRuntime().availableProcessors() * 2));
++        config.options().copyDefaults(true);
++        fastForPlugins = config.getBoolean("world-manager.fast-world-creation-for-plugins");
++        fastStartup = config.getBoolean("startup.fast-start");
++        preloadRadius = Math.max(0, Math.min(8, config.getInt("world-manager.spawn-preload-radius")));
++        autoloadInterval = Math.max(1, config.getInt("world-manager.autoload-interval-ticks"));
++        pregenParallel = Math.max(1, Math.min(256, config.getInt("world-manager.pregen-parallel-chunks")));
++        saveConfig();
++    }
++
++    private void saveConfig() {
++        try {
++            config.save(configFile);
++        } catch (IOException e) {
++            logger.log(Level.WARNING, "Konnte " + configFile + " nicht speichern", e);
++        }
++    }
++
++    private ConfigurationSection worldSection(String name) {
++        return config.getConfigurationSection("worlds." + name);
++    }
++
++    private void storeSpec(WorldSpec spec, boolean autoload) {
++        String p = "worlds." + spec.name() + ".";
++        config.set(p + "environment", spec.environment().name());
++        config.set(p + "type", spec.type().name().toLowerCase(Locale.ROOT));
++        config.set(p + "structures", spec.structures());
++        config.set(p + "autoload", autoload);
++        saveConfig();
++    }
++
++    public WorldSpec storedSpec(String name) {
++        ConfigurationSection s = worldSection(name);
++        if (s == null) {
++            return null;
++        }
++        World.Environment env;
++        try {
++            env = World.Environment.valueOf(s.getString("environment", "NORMAL"));
++        } catch (IllegalArgumentException e) {
++            env = World.Environment.NORMAL;
++        }
++        WorldSpec.Type type = WorldSpec.Type.parse(s.getString("type", "normal"));
++        return new WorldSpec(name, env, type == null ? WorldSpec.Type.NORMAL : type, null, s.getBoolean("structures", true));
++    }
++
++    public Set<String> managedWorlds() {
++        ConfigurationSection s = config.getConfigurationSection("worlds");
++        return s == null ? Set.of() : new TreeSet<>(s.getKeys(false));
++    }
++
++    public void setAutoload(String name, boolean autoload) {
++        config.set("worlds." + name + ".autoload", autoload);
++        saveConfig();
++    }
++
++    public boolean isAutoload(String name) {
++        return config.getBoolean("worlds." + name + ".autoload", false);
++    }
++
++    // ------------------------------------------------------------------ Tick
++
++    private void tick() {
++        long now = System.nanoTime();
++        boolean slowTick = lastTickNanos != 0 && now - lastTickNanos > 55_000_000L; // letzter Tick > 55 ms
++        lastTickNanos = now;
++        if (!started) {
++            started = true;
++            for (String name : managedWorlds()) {
++                if (isAutoload(name) && Bukkit.getWorld(name) != null) {
++                    continue;
++                }
++                if (isAutoload(name)) {
++                    autoloadQueue.add(name);
++                }
++            }
++            if (!autoloadQueue.isEmpty()) {
++                logger.info("[WorldManager] Lade " + autoloadQueue.size() + " Welt(en) im Hintergrund...");
++            }
++            // Spawnsuchen fortsetzen, die beim letzten Mal durch einen Stopp unterbrochen wurden
++            for (String name : config.getStringList("internal.pending-spawn")) {
++                World w = Bukkit.getWorld(name);
++                if (w != null && !provisionalSpawn.contains(((CraftWorld) w).getHandle())) {
++                    logger.info("[WorldManager] Setze unterbrochene Spawnsuche fuer '" + name + "' fort...");
++                    resolveSpawn(w, null);
++                }
++            }
++        }
++
++        Runnable task;
++        int budget = 64;
++        while (budget-- > 0 && (task = mainQueue.poll()) != null) {
++            try {
++                task.run();
++            } catch (Throwable t) {
++                logger.log(Level.SEVERE, "[WorldManager] Fehler in Hintergrundaufgabe", t);
++            }
++        }
++
++        if (pregen != null) {
++            pregen.tick(slowTick);
++        }
++
++        // AOT-Trainingslauf (start.bat): kurz laufen lassen, damit Java den Start-Cache aufzeichnen kann, dann beenden.
++        if (AOT_TRAINING && ++trainingTicks == 200) {
++            logger.info("[Tachyon] AOT-Training abgeschlossen - Server wird beendet, Java schreibt jetzt den Start-Cache...");
++            Bukkit.shutdown();
++        }
++
++        if (!autoloadQueue.isEmpty() && ++ticks % autoloadInterval == 0) {
++            String name = autoloadQueue.poll();
++            WorldSpec spec = storedSpec(name);
++            if (spec != null && Bukkit.getWorld(name) == null) {
++                if (!worldFolder(name).isDirectory()) {
++                    logger.warning("[WorldManager] Ordner fuer Welt '" + name + "' fehlt - uebersprungen.");
++                } else {
++                    loadOrCreate(spec, w -> logger.info("[WorldManager] Welt '" + name + "' bereit."),
++                            err -> logger.warning("[WorldManager] " + err));
++                }
++            }
++        }
++    }
++
++    // ------------------------------------------------------------------ Laden / Erstellen
++
++    public File worldFolder(String name) {
++        return new File(Bukkit.getWorldContainer(), name);
++    }
++
++    public boolean worldExistsOnDisk(String name) {
++        return new File(worldFolder(name), "level.dat").isFile();
++    }
++
++    public boolean isReady(World world) {
++        LoadState st = states.get(world.getName().toLowerCase(Locale.ROOT));
++        return st == null || st.ready;
++    }
++
++    /**
++     * Laedt oder erstellt eine Welt ohne den Main-Thread zu blockieren.
++     * onReady wird auf dem Main-Thread aufgerufen, sobald der Spawnbereich generiert ist.
++     */
++    public void loadOrCreate(WorldSpec spec, Consumer<World> onReady, Consumer<String> onError) {
++        if (!VALID_NAME.matcher(spec.name()).matches()) {
++            onError.accept("Ungueltiger Weltname. Erlaubt: A-Z, a-z, 0-9, _ und - (max. 64 Zeichen).");
++            return;
++        }
++        String key = spec.name().toLowerCase(Locale.ROOT);
++        World existing = Bukkit.getWorld(spec.name());
++        if (existing != null) {
++            whenReady(existing, onReady);
++            return;
++        }
++        LoadState pending = states.get(key);
++        if (pending != null && !pending.ready) {
++            pending.waiters.add(onReady);
++            return;
++        }
++
++        boolean isNew = !worldExistsOnDisk(spec.name());
++        long start = System.nanoTime();
++        World world;
++        managerDepth++;
++        try {
++            world = Bukkit.createWorld(spec.toCreator());
++        } catch (Throwable t) {
++            logger.log(Level.SEVERE, "[WorldManager] Welt '" + spec.name() + "' konnte nicht geladen werden", t);
++            onError.accept("Welt '" + spec.name() + "' konnte nicht geladen werden: " + t.getMessage());
++            return;
++        } finally {
++            managerDepth--;
++        }
++        if (world == null) {
++            onError.accept("Welt '" + spec.name() + "' konnte nicht geladen werden.");
++            return;
++        }
++        double ms = (System.nanoTime() - start) / 1_000_000.0;
++        logger.info(String.format(Locale.ROOT, "[WorldManager] Welt '%s' %s in %.1f ms (Main-Thread). Spawnbereich wird im Hintergrund generiert...",
++                world.getName(), isNew ? "erstellt" : "geladen", ms));
++
++        LoadState st = new LoadState();
++        st.waiters.add(onReady);
++        states.put(key, st);
++        storeSpec(spec, true);
++
++        ServerLevel level = ((CraftWorld) world).getHandle();
++        String resolvedKey = "worlds." + spec.name() + ".spawn-resolved";
++        boolean provisional = provisionalSpawn.remove(level);
++        boolean unresolved = config.contains(resolvedKey) && !config.getBoolean(resolvedKey);
++        if (provisional || unresolved) {
++            config.set(resolvedKey, false); // falls der Server vor dem Ende der Suche stoppt
++            saveConfig();
++            resolveSpawn(world, st);
++        } else {
++            preloadSpawn(world, st);
++        }
++    }
++
++    private void whenReady(World world, Consumer<World> callback) {
++        LoadState st = states.get(world.getName().toLowerCase(Locale.ROOT));
++        if (st == null || st.ready) {
++            callback.accept(world);
++        } else {
++            st.waiters.add(callback);
++        }
++    }
++
++    // ------------------------------------------------------------------ Asynchrone Spawnsuche
++
++    private void resolveSpawn(World world, LoadState st) {
++        final LoadState state = st != null ? st : states.computeIfAbsent(world.getName().toLowerCase(Locale.ROOT), k -> new LoadState());
++        ServerLevel level = ((CraftWorld) world).getHandle();
++        Location provisional = world.getSpawnLocation();
++        ChunkPos origin = new ChunkPos(provisional.getBlockX() >> 4, provisional.getBlockZ() >> 4);
++        List<ChunkPos> candidates = spiral(origin, SPAWN_SEARCH_RADIUS);
++        tryCandidate(world, level, candidates, 0, state);
++    }
++
++    private void tryCandidate(World world, ServerLevel level, List<ChunkPos> candidates, int index, LoadState st) {
++        if (Bukkit.getWorld(world.getUID()) == null) {
++            return; // Welt wurde inzwischen entladen
++        }
++        if (index >= candidates.size()) {
++            // Nichts gefunden (sehr selten, z.B. Ozean): hoechsten Block am Ursprung nehmen - Chunk ist schon geladen.
++            Location loc = world.getSpawnLocation();
++            int y = world.getHighestBlockYAt(loc.getBlockX(), loc.getBlockZ()) + 1;
++            finishSpawn(world, st, loc.getBlockX(), y, loc.getBlockZ());
++            return;
++        }
++        ChunkPos pos = candidates.get(index);
++        level.getChunkSource().addTicketAndLoadWithRadius(TicketType.TACHYON_WORLD_PRELOAD, pos, 0)
++                .whenComplete((result, error) -> mainQueue.add(() -> {
++                    if (Bukkit.getWorld(world.getUID()) == null) {
++                        return;
++                    }
++                    BlockPos spawn = error == null ? PlayerSpawnFinder.getSpawnPosInChunk(level, pos) : null;
++                    if (spawn != null) {
++                        finishSpawn(world, st, spawn.getX(), spawn.getY(), spawn.getZ());
++                    } else {
++                        tryCandidate(world, level, candidates, index + 1, st);
++                    }
++                }));
++    }
++
++    private void finishSpawn(World world, LoadState st, int x, int y, int z) {
++        world.setSpawnLocation(x, y, z);
++        if (config.contains("worlds." + world.getName())) {
++            config.set("worlds." + world.getName() + ".spawn-resolved", true);
++        }
++        setPendingSpawn(world.getName(), false);
++        preloadSpawn(world, st);
++    }
++
++    /** Merkt sich Welten mit noch provisorischem Spawn dauerhaft (internal.pending-spawn in tachyon.yml). */
++    private void setPendingSpawn(String worldName, boolean pending) {
++        List<String> list = new ArrayList<>(config.getStringList("internal.pending-spawn"));
++        boolean changed = pending ? !list.contains(worldName) && list.add(worldName) : list.remove(worldName);
++        if (changed) {
++            config.set("internal.pending-spawn", list.isEmpty() ? null : list);
++            saveConfig();
++        } else if (!pending) {
++            saveConfig();
++        }
++    }
++
++    private void preloadSpawn(World world, LoadState st) {
++        ServerLevel level = ((CraftWorld) world).getHandle();
++        Location spawn = world.getSpawnLocation();
++        ChunkPos center = new ChunkPos(spawn.getBlockX() >> 4, spawn.getBlockZ() >> 4);
++        long start = System.nanoTime();
++        level.getChunkSource().addTicketAndLoadWithRadius(TicketType.TACHYON_WORLD_PRELOAD, center, preloadRadius)
++                .whenComplete((result, error) -> mainQueue.add(() -> {
++                    st.ready = true;
++                    logger.info(String.format(Locale.ROOT, "[WorldManager] Welt '%s' bereit (Spawnbereich in %.1f s generiert, Server lief normal weiter).",
++                            world.getName(), (System.nanoTime() - start) / 1e9));
++                    List<Consumer<World>> waiters = new ArrayList<>(st.waiters);
++                    st.waiters.clear();
++                    for (Consumer<World> w : waiters) {
++                        try {
++                            w.accept(world);
++                        } catch (Throwable t) {
++                            logger.log(Level.WARNING, "[WorldManager] Fehler im Bereit-Callback", t);
++                        }
++                    }
++                }));
++    }
++
++    private static List<ChunkPos> spiral(ChunkPos origin, int radius) {
++        List<ChunkPos> out = new ArrayList<>((radius * 2 + 1) * (radius * 2 + 1));
++        out.add(origin);
++        for (int r = 1; r <= radius; r++) {
++            for (int dx = -r; dx <= r; dx++) {
++                for (int dz = -r; dz <= r; dz++) {
++                    if (Math.max(Math.abs(dx), Math.abs(dz)) == r) {
++                        out.add(new ChunkPos(origin.x() + dx, origin.z() + dz));
++                    }
++                }
++            }
++        }
++        return out;
++    }
++
++    // ------------------------------------------------------------------ Teleport / Entladen / Loeschen / Klonen
++
++    public Location safeSpawn(World world) {
++        return world.getSpawnLocation().clone().add(0.5, 0, 0.5);
++    }
++
++    public void teleportWhenReady(Player player, World world) {
++        whenReady(world, w -> {
++            if (player.isOnline()) {
++                player.teleport(safeSpawn(w));
++            }
++        });
++    }
++
++    /** @return Fehlermeldung oder null bei Erfolg */
++    public String unload(String name, boolean save) {
++        World world = Bukkit.getWorld(name);
++        if (world == null) {
++            return "Welt '" + name + "' ist nicht geladen.";
++        }
++        World main = Bukkit.getWorlds().get(0);
++        if (world.equals(main)) {
++            return "Die Hauptwelt kann nicht entladen werden.";
++        }
++        for (Player p : world.getPlayers()) {
++            p.teleport(safeSpawn(main));
++            p.sendMessage("§eDie Welt '" + name + "' wird entladen, du wurdest zum Spawn gebracht.");
++        }
++        if (!Bukkit.unloadWorld(world, save)) {
++            return "Welt '" + name + "' konnte nicht entladen werden (ein Plugin hat es verhindert?).";
++        }
++        states.remove(name.toLowerCase(Locale.ROOT));
++        return null;
++    }
++
++    public boolean isProtected(String name) {
++        String main = Bukkit.getWorlds().get(0).getName();
++        return name.equalsIgnoreCase(main) || name.equalsIgnoreCase(main + "_nether") || name.equalsIgnoreCase(main + "_the_end");
++    }
++
++    public void delete(String name, Consumer<String> onDone, Consumer<String> onError) {
++        if (isProtected(name)) {
++            onError.accept("Die Standardwelten koennen nicht geloescht werden.");
++            return;
++        }
++        if (Bukkit.getWorld(name) != null) {
++            String err = unload(name, false);
++            if (err != null) {
++                onError.accept(err);
++                return;
++            }
++        }
++        File folder = worldFolder(name);
++        config.set("worlds." + name, null);
++        saveConfig();
++        if (!folder.exists()) {
++            onDone.accept("Welt '" + name + "' aus der Verwaltung entfernt (kein Ordner vorhanden).");
++            return;
++        }
++        io.execute(() -> {
++            try {
++                deleteRecursive(folder.toPath());
++                mainQueue.add(() -> onDone.accept("Welt '" + name + "' wurde geloescht."));
++            } catch (IOException e) {
++                mainQueue.add(() -> onError.accept("Loeschen fehlgeschlagen: " + e.getMessage()));
++            }
++        });
++    }
++
++    public void cloneWorld(String source, String target, Consumer<World> onReady, Consumer<String> onError) {
++        if (!VALID_NAME.matcher(target).matches()) {
++            onError.accept("Ungueltiger Zielname.");
++            return;
++        }
++        if (!worldExistsOnDisk(source)) {
++            onError.accept("Quellwelt '" + source + "' existiert nicht.");
++            return;
++        }
++        if (Bukkit.getWorld(source) != null) {
++            onError.accept("Quellwelt '" + source + "' ist geladen - bitte zuerst '/wm unload " + source + "'.");
++            return;
++        }
++        if (worldFolder(target).exists()) {
++            onError.accept("Zielordner '" + target + "' existiert bereits.");
++            return;
++        }
++        WorldSpec srcSpec = storedSpec(source);
++        WorldSpec spec = srcSpec != null ? srcSpec.withName(target) : new WorldSpec(target, World.Environment.NORMAL, WorldSpec.Type.NORMAL, null, true);
++        Path from = worldFolder(source).toPath();
++        Path to = worldFolder(target).toPath();
++        io.execute(() -> {
++            try {
++                copyRecursive(from, to);
++                mainQueue.add(() -> {
++                    config.set("worlds." + target + ".spawn-resolved", true);
++                    loadOrCreate(spec, onReady, onError);
++                });
++            } catch (IOException e) {
++                mainQueue.add(() -> onError.accept("Kopieren fehlgeschlagen: " + e.getMessage()));
++            }
++        });
++    }
++
++    private static void deleteRecursive(Path root) throws IOException {
++        Files.walkFileTree(root, new SimpleFileVisitor<>() {
++            @Override
++            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
++                Files.delete(file);
++                return FileVisitResult.CONTINUE;
++            }
++
++            @Override
++            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
++                Files.delete(dir);
++                return FileVisitResult.CONTINUE;
++            }
++        });
++    }
++
++    private static void copyRecursive(Path from, Path to) throws IOException {
++        Files.walkFileTree(from, new SimpleFileVisitor<>() {
++            @Override
++            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
++                Files.createDirectories(to.resolve(from.relativize(dir)));
++                return FileVisitResult.CONTINUE;
++            }
++
++            @Override
++            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
++                String n = file.getFileName().toString();
++                if (n.equals("session.lock") || n.equals("uid.dat")) {
++                    return FileVisitResult.CONTINUE; // neue Welt bekommt eigene UID / eigenes Lock
++                }
++                Files.copy(file, to.resolve(from.relativize(file)), StandardCopyOption.COPY_ATTRIBUTES);
++                return FileVisitResult.CONTINUE;
++            }
++        });
++    }
++
++    /** Alle Weltordner (mit level.dat) im Server-Verzeichnis. */
++    public List<String> worldFoldersOnDisk() {
++        List<String> out = new ArrayList<>();
++        File[] files = Bukkit.getWorldContainer().listFiles(File::isDirectory);
++        if (files != null) {
++            for (File f : files) {
++                if (new File(f, "level.dat").isFile()) {
++                    out.add(f.getName());
++                }
++            }
++        }
++        Collections.sort(out);
++        return out;
++    }
++
++    // ------------------------------------------------------------------ Pregenerator
++
++    /** @return Fehlermeldung oder null */
++    public String startPregen(World world, int radiusBlocks, Consumer<String> progress) {
++        if (pregen != null) {
++            return "Es laeuft bereits eine Vorgenerierung fuer '" + pregen.world.getName() + "'. Stoppen mit /wm pregen stop";
++        }
++        int radius = Math.max(1, radiusBlocks >> 4);
++        Location c = world.getSpawnLocation();
++        pregen = new PregenTask(world, new ChunkPos(c.getBlockX() >> 4, c.getBlockZ() >> 4), radius, progress);
++        logger.info("[WorldManager] Vorgenerierung gestartet: '" + world.getName() + "', Radius " + radiusBlocks + " Bloecke (" + pregen.total + " Chunks).");
++        return null;
++    }
++
++    public String stopPregen() {
++        if (pregen == null) {
++            return null;
++        }
++        String status = pregen.status();
++        pregen.cancelled = true;
++        pregen = null;
++        return status;
++    }
++
++    public String pregenStatus() {
++        return pregen == null ? null : pregen.status();
++    }
++
++    private final class PregenTask {
++        final World world;
++        final ServerLevel level;
++        final ChunkPos center;
++        final int radius;
++        final long total;
++        final Consumer<String> progress;
++        final long startNanos = System.nanoTime();
++        int ring;
++        int ringIndex;
++        List<ChunkPos> ringPositions;
++        int inFlight;
++        long done;
++        int lastReportedPercent = -1;
++        long pausedTicks;
++        boolean cancelled;
++
++        PregenTask(World world, ChunkPos center, int radius, Consumer<String> progress) {
++            this.world = world;
++            this.level = ((CraftWorld) world).getHandle();
++            this.center = center;
++            this.radius = radius;
++            this.total = (long) (radius * 2 + 1) * (radius * 2 + 1);
++            this.progress = progress;
++            this.ringPositions = List.of(center);
++        }
++
++        /** Naechster Chunk in Ringen um das Zentrum (ohne riesige Liste im Speicher). */
++        private ChunkPos next() {
++            while (ringIndex >= ringPositions.size()) {
++                ring++;
++                if (ring > radius) {
++                    return null;
++                }
++                ringIndex = 0;
++                List<ChunkPos> list = new ArrayList<>(8 * ring);
++                for (int d = -ring; d < ring; d++) {
++                    list.add(new ChunkPos(center.x() + d, center.z() - ring));
++                    list.add(new ChunkPos(center.x() + ring, center.z() + d));
++                    list.add(new ChunkPos(center.x() - d, center.z() + ring));
++                    list.add(new ChunkPos(center.x() - ring, center.z() - d));
++                }
++                ringPositions = list;
++            }
++            return ringPositions.get(ringIndex++);
++        }
++
++        void tick(boolean slowTick) {
++            if (cancelled) {
++                return;
++            }
++            if (Bukkit.getWorld(world.getUID()) == null) {
++                progress.accept("Vorgenerierung abgebrochen: Welt '" + world.getName() + "' wurde entladen.");
++                pregen = null;
++                return;
++            }
++            if (slowTick) {
++                pausedTicks++;
++                return; // Server ist gerade ausgelastet - Spieler gehen vor
++            }
++            while (inFlight < pregenParallel) {
++                ChunkPos pos = next();
++                if (pos == null) {
++                    break;
++                }
++                inFlight++;
++                level.getChunkSource().addTicketAndLoadWithRadius(TicketType.TACHYON_PREGEN, pos, 0)
++                        .whenComplete((r, t) -> mainQueue.add(this::onChunkDone));
++            }
++        }
++
++        private void onChunkDone() {
++            inFlight--;
++            done++;
++            if (cancelled) {
++                return;
++            }
++            int percent = (int) (done * 100 / total);
++            if (done >= total) {
++                double secs = (System.nanoTime() - startNanos) / 1e9;
++                String msg = String.format(Locale.ROOT, "Vorgenerierung von '%s' fertig: %d Chunks in %.0f s.", world.getName(), total, secs);
++                logger.info("[WorldManager] " + msg);
++                progress.accept(msg);
++                pregen = null;
++                return;
++            }
++            if (percent / 5 != lastReportedPercent / 5) {
++                lastReportedPercent = percent;
++                String msg = status();
++                logger.info("[WorldManager] " + msg);
++                progress.accept(msg);
++            }
++        }
++
++        String status() {
++            double secs = (System.nanoTime() - startNanos) / 1e9;
++            double rate = secs > 0 ? done / secs : 0;
++            long remaining = rate > 0 ? (long) ((total - done) / rate) : -1;
++            return String.format(Locale.ROOT, "Pregen '%s': %d/%d Chunks (%d%%), %.0f Chunks/s, noch ca. %s%s",
++                    world.getName(), done, total, done * 100 / total, rate,
++                    remaining < 0 ? "?" : (remaining / 60) + " min " + (remaining % 60) + " s",
++                    pausedTicks > 0 ? ", " + pausedTicks + " Ticks wegen Last pausiert" : "");
++        }
++    }
++
++    private static final class LoadState {
++        boolean ready;
++        final List<Consumer<World>> waiters = new ArrayList<>();
++    }
++
++    // ------------------------------------------------------------------ WorldSpec
++
++    public record WorldSpec(String name, World.Environment environment, Type type, Long seed, boolean structures) {
++
++        public enum Type {
++            NORMAL, FLAT, AMPLIFIED, LARGE_BIOMES, VOID;
++
++            public static Type parse(String s) {
++                if (s == null) {
++                    return null;
++                }
++                try {
++                    return valueOf(s.toUpperCase(Locale.ROOT).replace('-', '_'));
++                } catch (IllegalArgumentException e) {
++                    return null;
++                }
++            }
++        }
++
++        public WorldSpec withName(String newName) {
++            return new WorldSpec(newName, environment, type, seed, structures);
++        }
++
++        public WorldCreator toCreator() {
++            WorldCreator wc = new WorldCreator(name).environment(environment).generateStructures(structures);
++            if (seed != null) {
++                wc.seed(seed);
++            }
++            switch (type) {
++                case FLAT -> wc.type(WorldType.FLAT);
++                case AMPLIFIED -> wc.type(WorldType.AMPLIFIED);
++                case LARGE_BIOMES -> wc.type(WorldType.LARGE_BIOMES);
++                case VOID -> wc.generator(new VoidGenerator());
++                default -> wc.type(WorldType.NORMAL);
++            }
++            return wc;
++        }
++    }
++}
+diff --git a/src/main/java/dev/tachyon/world/WorldManagerCommand.java b/src/main/java/dev/tachyon/world/WorldManagerCommand.java
+new file mode 100644
+index 000000000..da0ddd51f
+--- /dev/null
++++ b/src/main/java/dev/tachyon/world/WorldManagerCommand.java
+@@ -0,0 +1,408 @@
++package dev.tachyon.world;
++
++import java.util.ArrayList;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Locale;
++import java.util.Set;
++import org.bukkit.Bukkit;
++import org.bukkit.ChatColor;
++import org.bukkit.Location;
++import org.bukkit.World;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.entity.Player;
++
++/**
++ * /wm - eingebauter World-Manager von Tachyon.
++ */
++public final class WorldManagerCommand extends Command {
++
++    private static final String P = ChatColor.DARK_AQUA + "[Tachyon] " + ChatColor.RESET;
++    private static final List<String> SUB = List.of("create", "load", "unload", "delete", "clone", "tp", "list", "info", "setspawn", "autoload", "pregen", "reload");
++    private static final List<String> TYPES = List.of("normal", "flat", "amplified", "large_biomes", "void", "nether", "end");
++
++    public WorldManagerCommand(String name) {
++        super(name, "Tachyon World-Manager", "/wm <create|load|unload|delete|clone|tp|list|info|setspawn|autoload>", List.of("worldmanager", "worlds"));
++        setPermission("tachyon.command.wm");
++    }
++
++    @Override
++    public boolean execute(CommandSender sender, String label, String[] args) {
++        if (!testPermission(sender)) {
++            return true;
++        }
++        WorldManager wm = WorldManager.get();
++        if (wm == null) {
++            sender.sendMessage(P + ChatColor.RED + "World-Manager ist nicht initialisiert.");
++            return true;
++        }
++        if (args.length == 0) {
++            help(sender, label);
++            return true;
++        }
++        String sub = args[0].toLowerCase(Locale.ROOT);
++        switch (sub) {
++            case "create" -> create(wm, sender, label, args);
++            case "load" -> load(wm, sender, label, args);
++            case "unload" -> unload(wm, sender, label, args);
++            case "delete" -> delete(wm, sender, label, args);
++            case "clone" -> cloneWorld(wm, sender, label, args);
++            case "tp" -> tp(wm, sender, label, args);
++            case "list" -> list(wm, sender);
++            case "info" -> info(wm, sender, label, args);
++            case "setspawn" -> setSpawn(sender);
++            case "autoload" -> autoload(wm, sender, label, args);
++            case "pregen" -> pregen(wm, sender, label, args);
++            case "reload" -> {
++                wm.reloadConfig();
++                ok(sender, "tachyon.yml neu geladen.");
++            }
++            default -> help(sender, label);
++        }
++        return true;
++    }
++
++    private void help(CommandSender s, String label) {
++        s.sendMessage(P + ChatColor.AQUA + "World-Manager - Welten laden ohne Server-Haenger");
++        line(s, label, "create <name> [normal|flat|amplified|large_biomes|void|nether|end] [seed]", "neue Welt erstellen");
++        line(s, label, "load <name> [normal|nether|end]", "vorhandenen Weltordner laden");
++        line(s, label, "unload <name> [nosave]", "Welt entladen (bleibt auf der Festplatte)");
++        line(s, label, "delete <name> confirm", "Welt entladen und endgueltig loeschen");
++        line(s, label, "clone <quelle> <ziel>", "Welt kopieren (z.B. Vorlage fuer Minigames)");
++        line(s, label, "tp <name> [spieler]", "zum Spawn einer Welt teleportieren (laedt sie bei Bedarf)");
++        line(s, label, "list", "alle Welten mit Status");
++        line(s, label, "info <name>", "Details zu einer Welt");
++        line(s, label, "setspawn", "Weltspawn auf deine Position setzen");
++        line(s, label, "autoload <name> <true|false>", "beim Serverstart automatisch laden");
++        line(s, label, "pregen <name> <radius> | stop | status", "Welt im Hintergrund vorgenerieren (keine Lags beim Erkunden)");
++    }
++
++    private static void line(CommandSender s, String label, String usage, String desc) {
++        s.sendMessage(ChatColor.GRAY + " /" + label + " " + ChatColor.WHITE + usage + ChatColor.DARK_GRAY + " - " + ChatColor.GRAY + desc);
++    }
++
++    private static void ok(CommandSender s, String msg) {
++        s.sendMessage(P + ChatColor.GREEN + msg);
++    }
++
++    private static void err(CommandSender s, String msg) {
++        s.sendMessage(P + ChatColor.RED + msg);
++    }
++
++    private static void info(CommandSender s, String msg) {
++        s.sendMessage(P + ChatColor.GRAY + msg);
++    }
++
++    // ------------------------------------------------------------------ Unterbefehle
++
++    private void create(WorldManager wm, CommandSender s, String label, String[] a) {
++        if (a.length < 2) {
++            err(s, "Benutzung: /" + label + " create <name> [typ] [seed]");
++            return;
++        }
++        String name = a[1];
++        if (Bukkit.getWorld(name) != null || wm.worldFolder(name).exists()) {
++            err(s, "Welt/Ordner '" + name + "' existiert bereits. Nutze /" + label + " load " + name);
++            return;
++        }
++        String typeArg = a.length >= 3 ? a[2].toLowerCase(Locale.ROOT) : "normal";
++        World.Environment env = World.Environment.NORMAL;
++        WorldManager.WorldSpec.Type type;
++        switch (typeArg) {
++            case "nether" -> { env = World.Environment.NETHER; type = WorldManager.WorldSpec.Type.NORMAL; }
++            case "end", "the_end" -> { env = World.Environment.THE_END; type = WorldManager.WorldSpec.Type.NORMAL; }
++            default -> type = WorldManager.WorldSpec.Type.parse(typeArg);
++        }
++        if (type == null) {
++            err(s, "Unbekannter Typ '" + typeArg + "'. Moeglich: " + String.join(", ", TYPES));
++            return;
++        }
++        Long seed = null;
++        if (a.length >= 4) {
++            try {
++                seed = Long.parseLong(a[3]);
++            } catch (NumberFormatException e) {
++                seed = (long) a[3].hashCode(); // wie Vanilla: Text-Seeds werden gehasht
++            }
++        }
++        WorldManager.WorldSpec spec = new WorldManager.WorldSpec(name, env, type, seed, true);
++        info(s, "Erstelle Welt '" + name + "' (" + typeArg + ") - der Server laeuft dabei normal weiter...");
++        long start = System.currentTimeMillis();
++        wm.loadOrCreate(spec, w -> {
++            ok(s, "Welt '" + w.getName() + "' ist bereit (" + (System.currentTimeMillis() - start) + " ms). Teleport: /" + label + " tp " + w.getName());
++        }, msg -> err(s, msg));
++    }
++
++    private void load(WorldManager wm, CommandSender s, String label, String[] a) {
++        if (a.length < 2) {
++            err(s, "Benutzung: /" + label + " load <name> [normal|nether|end]");
++            return;
++        }
++        String name = a[1];
++        if (!wm.worldExistsOnDisk(name)) {
++            err(s, "Kein Weltordner '" + name + "' (mit level.dat) gefunden. Neue Welt: /" + label + " create " + name);
++            return;
++        }
++        WorldManager.WorldSpec spec = wm.storedSpec(name);
++        if (spec == null || a.length >= 3) {
++            World.Environment env = World.Environment.NORMAL;
++            if (a.length >= 3) {
++                switch (a[2].toLowerCase(Locale.ROOT)) {
++                    case "nether" -> env = World.Environment.NETHER;
++                    case "end", "the_end" -> env = World.Environment.THE_END;
++                    default -> env = World.Environment.NORMAL;
++                }
++            }
++            spec = new WorldManager.WorldSpec(name, env, spec != null ? spec.type() : WorldManager.WorldSpec.Type.NORMAL, null, true);
++        }
++        info(s, "Lade Welt '" + name + "'...");
++        long start = System.currentTimeMillis();
++        wm.loadOrCreate(spec, w -> ok(s, "Welt '" + w.getName() + "' geladen und bereit (" + (System.currentTimeMillis() - start) + " ms)."), msg -> err(s, msg));
++    }
++
++    private void unload(WorldManager wm, CommandSender s, String label, String[] a) {
++        if (a.length < 2) {
++            err(s, "Benutzung: /" + label + " unload <name> [nosave]");
++            return;
++        }
++        boolean save = !(a.length >= 3 && a[2].equalsIgnoreCase("nosave"));
++        String error = wm.unload(a[1], save);
++        if (error != null) {
++            err(s, error);
++            return;
++        }
++        if (wm.managedWorlds().contains(a[1])) {
++            wm.setAutoload(a[1], false);
++        }
++        ok(s, "Welt '" + a[1] + "' entladen" + (save ? " und gespeichert." : " (ohne Speichern)."));
++    }
++
++    private void delete(WorldManager wm, CommandSender s, String label, String[] a) {
++        if (a.length < 3 || !a[2].equalsIgnoreCase("confirm")) {
++            err(s, "Das loescht die Welt endgueltig! Bestaetigen mit: /" + label + " delete " + (a.length >= 2 ? a[1] : "<name>") + " confirm");
++            return;
++        }
++        info(s, "Loesche Welt '" + a[1] + "' im Hintergrund...");
++        wm.delete(a[1], msg -> ok(s, msg), msg -> err(s, msg));
++    }
++
++    private void cloneWorld(WorldManager wm, CommandSender s, String label, String[] a) {
++        if (a.length < 3) {
++            err(s, "Benutzung: /" + label + " clone <quelle> <ziel>");
++            return;
++        }
++        info(s, "Kopiere '" + a[1] + "' nach '" + a[2] + "' im Hintergrund...");
++        wm.cloneWorld(a[1], a[2], w -> ok(s, "Welt '" + w.getName() + "' ist bereit."), msg -> err(s, msg));
++    }
++
++    private void tp(WorldManager wm, CommandSender s, String label, String[] a) {
++        if (a.length < 2) {
++            err(s, "Benutzung: /" + label + " tp <welt> [spieler]");
++            return;
++        }
++        Player target;
++        if (a.length >= 3) {
++            target = Bukkit.getPlayerExact(a[2]);
++            if (target == null) {
++                err(s, "Spieler '" + a[2] + "' ist nicht online.");
++                return;
++            }
++        } else if (s instanceof Player p) {
++            target = p;
++        } else {
++            err(s, "Von der Konsole aus: /" + label + " tp <welt> <spieler>");
++            return;
++        }
++        String name = a[1];
++        World world = Bukkit.getWorld(name);
++        if (world != null) {
++            if (!wm.isReady(world)) {
++                info(s, "Welt '" + name + "' wird noch vorbereitet - Teleport folgt automatisch.");
++            }
++            wm.teleportWhenReady(target, world);
++            return;
++        }
++        if (!wm.worldExistsOnDisk(name)) {
++            err(s, "Welt '" + name + "' existiert nicht.");
++            return;
++        }
++        WorldManager.WorldSpec spec = wm.storedSpec(name);
++        if (spec == null) {
++            spec = new WorldManager.WorldSpec(name, World.Environment.NORMAL, WorldManager.WorldSpec.Type.NORMAL, null, true);
++        }
++        info(s, "Welt '" + name + "' wird geladen - Teleport folgt automatisch.");
++        wm.loadOrCreate(spec, w -> {
++            if (target.isOnline()) {
++                target.teleport(wm.safeSpawn(w));
++            }
++        }, msg -> err(s, msg));
++    }
++
++    private void list(WorldManager wm, CommandSender s) {
++        s.sendMessage(P + ChatColor.AQUA + "Welten:");
++        Set<String> seen = new LinkedHashSet<>();
++        for (World w : Bukkit.getWorlds()) {
++            seen.add(w.getName());
++            String state = wm.isReady(w) ? ChatColor.GREEN + "geladen" : ChatColor.YELLOW + "wird vorbereitet";
++            s.sendMessage(ChatColor.GRAY + " - " + ChatColor.WHITE + w.getName() + ChatColor.DARK_GRAY + " [" + state + ChatColor.DARK_GRAY + "] "
++                    + ChatColor.GRAY + w.getEnvironment().name().toLowerCase(Locale.ROOT) + ", " + w.getPlayers().size() + " Spieler, "
++                    + w.getLoadedChunks().length + " Chunks" + (wm.isAutoload(w.getName()) ? ", autoload" : ""));
++        }
++        List<String> disk = new ArrayList<>(wm.worldFoldersOnDisk());
++        disk.addAll(wm.managedWorlds());
++        for (String name : new LinkedHashSet<>(disk)) {
++            if (seen.add(name)) {
++                boolean exists = wm.worldExistsOnDisk(name);
++                s.sendMessage(ChatColor.GRAY + " - " + ChatColor.WHITE + name + ChatColor.DARK_GRAY + " ["
++                        + (exists ? ChatColor.GRAY + "entladen" : ChatColor.RED + "Ordner fehlt") + ChatColor.DARK_GRAY + "]"
++                        + (wm.isAutoload(name) ? ChatColor.GRAY + " autoload" : ""));
++            }
++        }
++    }
++
++    private void info(WorldManager wm, CommandSender s, String label, String[] a) {
++        if (a.length < 2) {
++            err(s, "Benutzung: /" + label + " info <name>");
++            return;
++        }
++        World w = Bukkit.getWorld(a[1]);
++        if (w == null) {
++            info(s, "Welt '" + a[1] + "' ist nicht geladen" + (wm.worldExistsOnDisk(a[1]) ? " (Ordner vorhanden)." : " und existiert nicht."));
++            return;
++        }
++        Location sp = w.getSpawnLocation();
++        s.sendMessage(P + ChatColor.AQUA + w.getName());
++        s.sendMessage(ChatColor.GRAY + " Status: " + (wm.isReady(w) ? "bereit" : "wird vorbereitet"));
++        s.sendMessage(ChatColor.GRAY + " Umgebung: " + w.getEnvironment() + ", Seed: " + w.getSeed());
++        s.sendMessage(ChatColor.GRAY + " Spawn: " + sp.getBlockX() + " / " + sp.getBlockY() + " / " + sp.getBlockZ());
++        s.sendMessage(ChatColor.GRAY + " Spieler: " + w.getPlayers().size() + ", Chunks: " + w.getLoadedChunks().length + ", Entities: " + w.getEntities().size());
++        s.sendMessage(ChatColor.GRAY + " Autoload: " + wm.isAutoload(w.getName()));
++    }
++
++    private void setSpawn(CommandSender s) {
++        if (!(s instanceof Player p)) {
++            err(s, "Nur fuer Spieler.");
++            return;
++        }
++        Location l = p.getLocation();
++        p.getWorld().setSpawnLocation(l);
++        ok(s, "Spawn von '" + p.getWorld().getName() + "' gesetzt auf " + l.getBlockX() + " / " + l.getBlockY() + " / " + l.getBlockZ() + ".");
++    }
++
++    private void autoload(WorldManager wm, CommandSender s, String label, String[] a) {
++        if (a.length < 3) {
++            err(s, "Benutzung: /" + label + " autoload <name> <true|false>");
++            return;
++        }
++        if (!wm.managedWorlds().contains(a[1])) {
++            err(s, "Welt '" + a[1] + "' wird nicht vom World-Manager verwaltet. Einmal mit /" + label + " load laden.");
++            return;
++        }
++        boolean v = Boolean.parseBoolean(a[2]);
++        wm.setAutoload(a[1], v);
++        ok(s, "Autoload fuer '" + a[1] + "' = " + v);
++    }
++
++    private void pregen(WorldManager wm, CommandSender s, String label, String[] a) {
++        if (a.length >= 2 && a[1].equalsIgnoreCase("stop")) {
++            String st = wm.stopPregen();
++            if (st == null) {
++                err(s, "Es laeuft keine Vorgenerierung.");
++            } else {
++                ok(s, "Vorgenerierung gestoppt. Stand: " + st);
++            }
++            return;
++        }
++        if (a.length >= 2 && a[1].equalsIgnoreCase("status")) {
++            String st = wm.pregenStatus();
++            info(s, st == null ? "Es laeuft keine Vorgenerierung." : st);
++            return;
++        }
++        if (a.length < 3) {
++            err(s, "Benutzung: /" + label + " pregen <welt> <radius in Bloecken> | stop | status");
++            return;
++        }
++        World w = Bukkit.getWorld(a[1]);
++        if (w == null) {
++            err(s, "Welt '" + a[1] + "' ist nicht geladen.");
++            return;
++        }
++        int radius;
++        try {
++            radius = Integer.parseInt(a[2]);
++        } catch (NumberFormatException e) {
++            err(s, "Radius muss eine Zahl (Bloecke) sein, z.B. 2000.");
++            return;
++        }
++        if (radius < 16 || radius > 50000) {
++            err(s, "Radius bitte zwischen 16 und 50000 Bloecken.");
++            return;
++        }
++        String error = wm.startPregen(w, radius, msg -> {
++            if (s instanceof Player p && p.isOnline()) {
++                p.sendMessage(P + ChatColor.GRAY + msg);
++            }
++        });
++        if (error != null) {
++            err(s, error);
++        } else {
++            ok(s, "Vorgenerierung fuer '" + w.getName() + "' gestartet (Radius " + radius + " Bloecke um den Spawn). Status: /" + label + " pregen status");
++        }
++    }
++
++    // ------------------------------------------------------------------ Tab-Vervollstaendigung
++
++    @Override
++    public List<String> tabComplete(CommandSender sender, String alias, String[] args) {
++        if (!testPermissionSilent(sender)) {
++            return List.of();
++        }
++        WorldManager wm = WorldManager.get();
++        if (args.length == 1) {
++            return filter(SUB, args[0]);
++        }
++        String sub = args[0].toLowerCase(Locale.ROOT);
++        if (args.length == 2 && sub.equals("pregen")) {
++            List<String> opts = new ArrayList<>(List.of("stop", "status"));
++            for (World w : Bukkit.getWorlds()) {
++                opts.add(w.getName());
++            }
++            return filter(opts, args[1]);
++        }
++        if (args.length == 2 && wm != null && !sub.equals("create")) {
++            Set<String> names = new LinkedHashSet<>();
++            for (World w : Bukkit.getWorlds()) {
++                names.add(w.getName());
++            }
++            if (!sub.equals("unload")) {
++                names.addAll(wm.worldFoldersOnDisk());
++            }
++            return filter(new ArrayList<>(names), args[1]);
++        }
++        if (args.length == 3) {
++            return switch (sub) {
++                case "create" -> filter(TYPES, args[2]);
++                case "load" -> filter(List.of("normal", "nether", "end"), args[2]);
++                case "unload" -> filter(List.of("nosave"), args[2]);
++                case "delete" -> filter(List.of("confirm"), args[2]);
++                case "autoload" -> filter(List.of("true", "false"), args[2]);
++                case "pregen" -> filter(List.of("1000", "2000", "5000", "10000"), args[2]);
++                case "tp" -> filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), args[2]);
++                default -> List.of();
++            };
++        }
++        return List.of();
++    }
++
++    private static List<String> filter(List<String> options, String prefix) {
++        String p = prefix.toLowerCase(Locale.ROOT);
++        List<String> out = new ArrayList<>();
++        for (String o : options) {
++            if (o.toLowerCase(Locale.ROOT).startsWith(p)) {
++                out.add(o);
++            }
++        }
++        return out;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/Main.java b/src/main/java/net/minecraft/server/Main.java
+index c2177e77a..dba390076 100644
+--- a/src/main/java/net/minecraft/server/Main.java
++++ b/src/main/java/net/minecraft/server/Main.java
+@@ -118,13 +118,18 @@ public class Main {
+                 writePidFile(path);
+             }
+ 
+-            CrashReport.preload();
++            // Tachyon start - Vorrats-Absturzbericht (inkl. langsamer Hardware-Abfrage per OSHI) parallel zum Bootstrap erstellen
++            Thread crashPreload = new Thread(CrashReport::preload, "Tachyon-CrashReport-Preload");
++            crashPreload.setDaemon(true);
++            crashPreload.start();
++            // Tachyon end
+             if (optionset.has("jfrProfile")) { // CraftBukkit
+                 JvmProfiler.INSTANCE.start(Environment.SERVER);
+             }
+ 
+             Bootstrap.bootStrap();
+             Bootstrap.validate();
++            dev.tachyon.console.TachyonConsole.step("Minecraft-Kern geladen"); // Tachyon
+             Util.startTimerHackThread();
+             Path path1 = Paths.get("server.properties");
+             DedicatedServerSettings dedicatedserversettings = new DedicatedServerSettings(optionset); // CraftBukkit - CLI argument support
+@@ -269,6 +274,7 @@ public class Main {
+ 
+             levelstoragesource_levelstorageaccess.saveDataTag(worlddata);
+             */
++            dev.tachyon.console.TachyonConsole.step("Konfiguration & Datapacks"); // Tachyon
+             final DedicatedServer dedicatedserver = (DedicatedServer) MinecraftServer.spin((thread) -> {
+                 DedicatedServer dedicatedserver1 = new DedicatedServer(optionset, worldLoader.get(), thread, levelstoragesource_levelstorageaccess, packrepository, worldstem, Optional.empty(), dedicatedserversettings, DataFixers.getDataFixer(), services, managementserver, notificationmanager);
+ 
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 4545f039c..804639063 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -526,8 +526,11 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+ 
+         RegistryAccess.Frozen registryaccess_frozen = this.registries.compositeAccess();
+         Registry<LevelStem> dimensions = registryaccess_frozen.lookupOrThrow(Registries.LEVEL_STEM);
++        int tachyonWorldIndex = 0; // Tachyon
++        int tachyonWorldCount = dimensions.size(); // Tachyon
+         for (LevelStem worldDimension : dimensions) {
+             ResourceKey<LevelStem> dimensionKey = dimensions.getResourceKey(worldDimension).get();
++            dev.tachyon.console.TachyonConsole.subProgress(0.76, 0.94, tachyonWorldIndex++, tachyonWorldCount, "Welten laden: " + dimensionKey.identifier().getPath()); // Tachyon
+ 
+             ServerLevel world;
+             int dimension = 0;
+@@ -785,14 +788,27 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             levelLoadListener.start(LevelLoadListener.Stage.PREPARE_GLOBAL_SPAWN, 0);
+             levelLoadListener.updateFocus(level.dimension(), chunkpos);
+             int i = serverchunkcache.getGenerator().getSpawnHeight(level);
++            // Tachyon start - keine synchrone Chunk-Generierung auf dem Main-Thread
++            final boolean tachyonFast = dev.tachyon.world.WorldManager.isFastLoading();
+ 
+             if (i < level.getMinY()) {
++                if (tachyonFast) {
++                    i = level.getSeaLevel() + 1; // provisorisch, wird asynchron korrigiert
++                } else {
+                 BlockPos blockpos = chunkpos.getWorldPosition();
+ 
+                 i = level.getHeight(Heightmap.Types.WORLD_SURFACE, blockpos.getX() + 8, blockpos.getZ() + 8);
++                }
+             }
+ 
+             levelData.setSpawn(LevelData.RespawnData.of(level.dimension(), chunkpos.getWorldPosition().offset(8, i, 8), 0.0F, 0.0F));
++            if (tachyonFast) {
++                // Statt 11x11 Chunks synchron zu generieren, sucht der World-Manager den Spawn im Hintergrund.
++                dev.tachyon.world.WorldManager.markProvisionalSpawn(level);
++                levelLoadListener.finish(LevelLoadListener.Stage.PREPARE_GLOBAL_SPAWN);
++                return;
++            }
++            // Tachyon end
+             int j = 0;
+             int k = 0;
+             int l = 0;
+@@ -858,6 +874,14 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             });
+         }
+ 
++        // Tachyon start - Chunks laden im Hintergrund weiter, statt den Main-Thread warten zu lassen
++        if (dev.tachyon.world.WorldManager.isFastLoading()) {
++            this.forceTicks = false;
++            this.updateEffectiveRespawnData();
++            return;
++        }
++        // Tachyon end
++
+         this.levelLoadListener.start(LevelLoadListener.Stage.LOAD_INITIAL_CHUNKS, chunkloadcounter.totalChunks());
+ 
+         do {
+@@ -957,6 +981,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     // CraftBukkit end
+ 
+     protected void stopServer() {
++        dev.tachyon.console.TachyonConsole.abortStartup(); // Tachyon - Konsole wieder normal, falls waehrend des Starts gestoppt wird
+         // CraftBukkit start - prevent double stopping on multiple threads
+         synchronized(stopLock) {
+             if (hasStopped) return;
+@@ -1354,6 +1379,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+                 MinecraftServer.LOGGER.error("Couldn't load server icon", exception);
+                 return Optional.empty();
+             }
++        }).or(() -> { // Tachyon - eingebautes Icon, solange kein eigenes server-icon.png existiert
++            try (java.io.InputStream in = MinecraftServer.class.getResourceAsStream("/tachyon/server-icon.png")) {
++                return in == null ? Optional.empty() : Optional.of(new ServerStatus.Favicon(in.readAllBytes()));
++            } catch (IOException e) {
++                return Optional.empty();
++            }
+         });
+     }
+ 
+@@ -1564,6 +1595,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         while (!processQueue.isEmpty()) {
+             processQueue.remove().run();
+         }
++        dev.tachyon.world.WorldManager.tickHook(); // Tachyon
+         SpigotTimings.processQueueTimer.stopTiming(); // Spigot
+         // CraftBukkit end
+ 
+@@ -1710,7 +1742,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     }
+ 
+     public String getServerModName() {
+-        return "Spigot"; // Spigot - Spigot > // CraftBukkit - cb > vanilla!
++        return dev.tachyon.Tachyon.NAME; // Tachyon > Spigot > CraftBukkit > vanilla!
+     }
+ 
+     public ServerClockManager clockManager() {
+diff --git a/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java b/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java
+index 9959efd62..cf6d378a5 100644
+--- a/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java
+@@ -183,6 +183,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+                     return;
+                 }
+ 
++                dev.tachyon.console.TachyonConsole.awaitStartup(); // Tachyon
+                 // MC-33041, SPIGOT-5538: if System.in is not valid due to javaw, then return
+                 try {
+                     System.in.available();
+@@ -267,6 +268,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+         }
+         // Spigot start
+         this.setPlayerList(new DedicatedPlayerList(this, this.registries(), this.playerDataStorage));
++        dev.tachyon.world.WorldManager.init(new java.io.File("tachyon.yml")); // Tachyon - vor den Commands initialisieren
+         org.spigotmc.SpigotConfig.init((java.io.File) options.valueOf("spigot-settings"));
+         org.spigotmc.SpigotConfig.registerCommands();
+         // Spigot end
+@@ -299,6 +301,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+         // this.setPlayerList(new DedicatedPlayerList(this, this.registries(), this.playerDataStorage)); // Spigot - moved up
+         server.loadPlugins();
+         server.enablePlugins(org.bukkit.plugin.PluginLoadOrder.STARTUP);
++        dev.tachyon.console.TachyonConsole.step("Plugins geladen"); // Tachyon
+         // CraftBukkit end
+ 
+         if (!this.usesAuthentication()) {
+@@ -329,10 +332,12 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+             this.services.nameToIdCache().resolveOfflineUsers(!this.usesAuthentication());
+             DedicatedServer.LOGGER.info("Preparing level \"{}\"", this.getLevelIdName());
+             this.loadLevel(storageSource.getLevelId()); // CraftBukkit
++            dev.tachyon.console.TachyonConsole.step("Welten geladen"); // Tachyon
+             long j = Util.getNanos() - i;
+             String s = String.format(Locale.ROOT, "%.3fs", (double) j / 1.0E9D);
+ 
+             DedicatedServer.LOGGER.info("Done ({})! For help, type \"help\"", s);
++            dev.tachyon.console.TachyonConsole.ready(this.getPort()); // Tachyon
+             if (dedicatedserverproperties.announcePlayerAchievements != null) {
+                 this.overworld().getGameRules().set(GameRules.SHOW_ADVANCEMENT_MESSAGES, dedicatedserverproperties.announcePlayerAchievements, this.overworld()); // CraftBukkit - per-world
+             }
+@@ -726,7 +731,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+ 
+     @Override
+     public String getMotd() {
+-        return this.settings.getProperties().motd.get();
++        return dev.tachyon.Tachyon.motd(this.settings.getProperties().motd.get()); // Tachyon - farbige Standard-MOTD
+     }
+ 
+     @Override
+@@ -898,6 +903,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+     protected void stopServer() {
+         this.notificationManager().serverShuttingDown();
+         super.stopServer();
++        dev.tachyon.world.WorldManager.shutdown(); // Tachyon
+         Util.shutdownExecutors();
+         // CraftBukkit start
+         Thread consoleThread = this.consoleThread;
+diff --git a/src/main/java/net/minecraft/server/dedicated/DedicatedServerProperties.java b/src/main/java/net/minecraft/server/dedicated/DedicatedServerProperties.java
+index bc06a8285..442b251e0 100644
+--- a/src/main/java/net/minecraft/server/dedicated/DedicatedServerProperties.java
++++ b/src/main/java/net/minecraft/server/dedicated/DedicatedServerProperties.java
+@@ -65,7 +65,7 @@ public class DedicatedServerProperties extends Settings<DedicatedServerPropertie
+     public final boolean preventProxyConnections = this.get("prevent-proxy-connections", false);
+     public final String serverIp = this.get("server-ip", "");
+     public final Settings<DedicatedServerProperties>.MutableValue<Boolean> allowFlight = this.getMutable("allow-flight", false);
+-    public final Settings<DedicatedServerProperties>.MutableValue<String> motd = this.getMutable("motd", "A Minecraft Server");
++    public final Settings<DedicatedServerProperties>.MutableValue<String> motd = this.getMutable("motd", dev.tachyon.Tachyon.DEFAULT_MOTD); // Tachyon
+     public final boolean codeOfConduct = this.get("enable-code-of-conduct", false);
+     public final String bugReportLink = this.get("bug-report-link", "");
+     public final Settings<DedicatedServerProperties>.MutableValue<Boolean> forceGameMode = this.getMutable("force-gamemode", false);
+@@ -159,7 +159,7 @@ public class DedicatedServerProperties extends Settings<DedicatedServerPropertie
+         this.chatSpamThresholdSeconds = this.get("chat-spam-threshold-seconds", 10);
+         this.viewDistance = this.getMutable("view-distance", 10);
+         this.simulationDistance = this.getMutable("simulation-distance", 10);
+-        this.maxPlayers = this.getMutable("max-players", 20);
++        this.maxPlayers = this.getMutable("max-players", 100); // Tachyon
+         this.networkCompressionThreshold = this.get("network-compression-threshold", 256);
+         this.broadcastRconToOps = this.get("broadcast-rcon-to-ops", true);
+         this.broadcastConsoleToOps = this.get("broadcast-console-to-ops", true);
+@@ -178,7 +178,7 @@ public class DedicatedServerProperties extends Settings<DedicatedServerPropertie
+         this.textFilteringVersion = this.get("text-filtering-version", 0);
+         this.playerIdleTimeout = this.getMutable("player-idle-timeout", 0);
+         this.statusHeartbeatInterval = this.getMutable("status-heartbeat-interval", 0);
+-        this.whiteList = this.getMutable("white-list", true);
++        this.whiteList = this.getMutable("white-list", false); // Tachyon - Whitelist standardmaessig aus
+         this.enforceSecureProfile = this.get("enforce-secure-profile", true);
+         this.logIPs = this.get("log-ips", true);
+         this.pauseWhenEmptySeconds = this.getMutable("pause-when-empty-seconds", 60);
+diff --git a/src/main/java/net/minecraft/server/level/TicketType.java b/src/main/java/net/minecraft/server/level/TicketType.java
+index 3302f7c93..83632b83c 100644
+--- a/src/main/java/net/minecraft/server/level/TicketType.java
++++ b/src/main/java/net/minecraft/server/level/TicketType.java
+@@ -28,6 +28,10 @@ public record TicketType(long timeout, @TicketType.Flags int flags) {
+     public static long pluginTimeout = 0L;
+     public static final TicketType PLUGIN = register("plugin", 0L, 14);
+     public static final TicketType PLUGIN_TICKET = register("plugin_ticket", 0L, 14);
++    // Tachyon - World-Manager: haelt Spawnsuche/Spawnbereich 10 s geladen (Timer laeuft erst, wenn der Chunk geladen ist)
++    public static final TicketType TACHYON_WORLD_PRELOAD = register("tachyon_world_preload", 200L, 2);
++    // Tachyon - Pregenerator: Chunk wird direkt nach dem Generieren wieder freigegeben (und gespeichert)
++    public static final TicketType TACHYON_PREGEN = register("tachyon_pregen", 1L, 2);
+ 
+     @Override
+     public long timeout() {
+diff --git a/src/main/java/net/minecraft/world/level/chunk/ChunkGenerator.java b/src/main/java/net/minecraft/world/level/chunk/ChunkGenerator.java
+index e37904285..c7117a3b5 100644
+--- a/src/main/java/net/minecraft/world/level/chunk/ChunkGenerator.java
++++ b/src/main/java/net/minecraft/world/level/chunk/ChunkGenerator.java
+@@ -600,7 +600,7 @@ public abstract class ChunkGenerator {
+         if (structurestart.isValid()) {
+             // CraftBukkit start
+             BoundingBox box = structurestart.getBoundingBox();
+-            org.bukkit.event.world.AsyncStructureSpawnEvent event = new org.bukkit.event.world.AsyncStructureSpawnEvent(structureManager.level.getMinecraftWorld().getWorld(), org.bukkit.craftbukkit.generator.structure.CraftStructure.minecraftToBukkit(structure), new org.bukkit.util.BoundingBox(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ()), sourceChunkPos.x(), sourceChunkPos.z());
++            org.bukkit.event.world.AsyncStructureSpawnEvent event = new org.bukkit.event.world.AsyncStructureSpawnEvent(structureManager.level.getMinecraftWorld().getWorld(), !org.bukkit.Bukkit.isPrimaryThread(), org.bukkit.craftbukkit.generator.structure.CraftStructure.minecraftToBukkit(structure), new org.bukkit.util.BoundingBox(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ()), sourceChunkPos.x(), sourceChunkPos.z());
+             org.bukkit.Bukkit.getPluginManager().callEvent(event);
+             if (event.isCancelled()) {
+                 return true;
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index fe998af97..23b4897da 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -472,8 +472,11 @@ public final class CraftServer implements Server {
+         File pluginFolder = (File) console.options.valueOf("plugins");
+ 
+         if (pluginFolder.exists()) {
++            dev.tachyon.console.TachyonConsole.progress(0.52, "Plugins suchen"); // Tachyon
+             Plugin[] plugins = pluginManager.loadPlugins(pluginFolder);
++            int tachyonIndex = 0; // Tachyon
+             for (Plugin plugin : plugins) {
++                dev.tachyon.console.TachyonConsole.subProgress(0.55, 0.65, tachyonIndex++, plugins.length, "Plugins laden: " + plugin.getName()); // Tachyon
+                 try {
+                     String message = String.format("Loading %s", plugin.getDescription().getFullName());
+                     plugin.getLogger().info(message);
+@@ -495,10 +498,18 @@ public final class CraftServer implements Server {
+ 
+         Plugin[] plugins = pluginManager.getPlugins();
+ 
++        int tachyonIndex = 0; // Tachyon
+         for (Plugin plugin : plugins) {
+             if ((!plugin.isEnabled()) && (plugin.getDescription().getLoad() == type)) {
++                // Tachyon - Fortschritt pro Plugin
++                if (type == PluginLoadOrder.STARTUP) {
++                    dev.tachyon.console.TachyonConsole.subProgress(0.65, 0.75, tachyonIndex, plugins.length, "Plugins starten: " + plugin.getName());
++                } else {
++                    dev.tachyon.console.TachyonConsole.subProgress(0.95, 0.97, tachyonIndex, plugins.length, "Plugins starten: " + plugin.getName());
++                }
+                 enablePlugin(plugin);
+             }
++            tachyonIndex++; // Tachyon
+         }
+ 
+         if (type == PluginLoadOrder.POSTWORLD) {
+diff --git a/src/main/java/org/bukkit/craftbukkit/Main.java b/src/main/java/org/bukkit/craftbukkit/Main.java
+index 2c252ac4c..56b989c38 100644
+--- a/src/main/java/org/bukkit/craftbukkit/Main.java
++++ b/src/main/java/org/bukkit/craftbukkit/Main.java
+@@ -7,7 +7,6 @@ import java.util.Arrays;
+ import java.util.Calendar;
+ import java.util.Date;
+ import java.util.List;
+-import java.util.concurrent.TimeUnit;
+ import java.util.logging.Level;
+ import java.util.logging.Logger;
+ import joptsimple.OptionParser;
+@@ -199,14 +198,12 @@ public class Main {
+                     Calendar deadline = Calendar.getInstance();
+                     deadline.add(Calendar.WEEK_OF_YEAR, -4);
+                     if (buildDate.before(deadline.getTime())) {
+-                        System.err.println("*** Error, this build is outdated ***");
+-                        System.err.println("*** Please download a new build as per instructions from https://www.spigotmc.org/go/outdated-spigot ***");
+-                        System.err.println("*** Server will start in 20 seconds ***");
+-                        Thread.sleep(TimeUnit.SECONDS.toMillis(20));
++                        // Tachyon - kein 20-Sekunden-Zwangswarten mehr bei aelteren Builds, nur ein Hinweis
++                        System.err.println("*** Hinweis: Dieser Build ist aelter als 4 Wochen - bei Gelegenheit neu bauen. ***");
+                     }
+                 }
+ 
+-                System.out.println("Loading libraries, please wait...");
++                dev.tachyon.console.TachyonConsole.banner(); // Tachyon
+                 net.minecraft.server.Main.main(options);
+             } catch (Throwable t) {
+                 t.printStackTrace();
+diff --git a/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java b/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java
+index 02c6eb198..2326539ed 100644
+--- a/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java
++++ b/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java
+@@ -19,10 +19,19 @@ import java.nio.file.StandardCopyOption;
+ import java.security.DigestOutputStream;
+ import java.security.MessageDigest;
+ import java.util.ArrayList;
++import java.util.HashMap;
+ import java.util.List;
++import java.util.Map;
+ 
+ public class Main {
+ 
++    // Tachyon start - Hash-Cache: SHA-256 nur neu berechnen, wenn sich Groesse/Datum einer Datei geaendert haben
++    private static final String VERIFIED_FILE = ".tachyon-verified";
++    private final Map<String, String> verified = new HashMap<>();
++    private final Map<String, String> verifiedNew = new HashMap<>();
++    private int unpacked;
++    // Tachyon end
++
+     public static void main(String[] argv) {
+         new Main().run(argv);
+     }
+@@ -32,18 +41,23 @@ public class Main {
+             String defaultMainClassName = readResource("main-class", BufferedReader::readLine);
+             String mainClassName = System.getProperty("bundlerMainClass", defaultMainClassName);
+ 
+-            String repoDir = System.getProperty("bundlerRepoDir", "bundler");
++            String repoDir = System.getProperty("bundlerRepoDir", "tachyon-libs"); // Tachyon - nicht mit Spigots "bundler" kollidieren
+             Path outputDir = Paths.get(repoDir).toAbsolutePath();
+             if (!Files.isDirectory(outputDir)) {
+                 Files.createDirectories(outputDir);
+             }
+ 
+-            System.out.println("Unbundling libraries to " + outputDir);
+ 
+             boolean readOnly = Boolean.getBoolean("bundlerReadOnly");
+             List<URL> extractedUrls = new ArrayList<>();
++            loadVerified(outputDir); // Tachyon
+             readAndExtractDir("versions", outputDir, extractedUrls, readOnly);
+             readAndExtractDir("libraries", outputDir, extractedUrls, readOnly);
++            saveVerified(outputDir); // Tachyon
++            if (unpacked > 0) {
++                System.out.println("[Tachyon] " + unpacked + " Bibliotheken nach " + outputDir.getFileName() + " entpackt.");
++            }
++            writeLaunchArgs(outputDir, extractedUrls, defaultMainClassName); // Tachyon
+ 
+             if (mainClassName == null || mainClassName.isEmpty()) {
+                 System.out.println("Empty main class specified, exiting");
+@@ -97,11 +111,72 @@ public class Main {
+     }
+ 
+     private void checkAndExtractJar(String subdir, FileEntry entry, Path outputFile) throws Exception {
+-        if (!Files.exists(outputFile) || !checkIntegrity(outputFile, entry.hash())) {
+-            System.out.printf("Unpacking %s (%s:%s) to %s%n", entry.path, subdir, entry.id, outputFile);
+-            extractJar(subdir, entry.path, outputFile);
++        // Tachyon start - bekannte, unveraenderte Datei nicht jedes Mal komplett hashen
++        String key = subdir + "/" + entry.path;
++        if (Files.exists(outputFile)) {
++            String stamp = entry.hash() + " " + Files.size(outputFile) + " " + Files.getLastModifiedTime(outputFile).toMillis();
++            if (stamp.equals(verified.get(key)) || checkIntegrity(outputFile, entry.hash())) {
++                verifiedNew.put(key, entry.hash() + " " + Files.size(outputFile) + " " + Files.getLastModifiedTime(outputFile).toMillis());
++                return;
++            }
++        }
++        // Tachyon end
++        unpacked++; // Tachyon - kompakte Ausgabe statt einer Zeile pro Bibliothek
++        extractJar(subdir, entry.path, outputFile);
++        verifiedNew.put(key, entry.hash() + " " + Files.size(outputFile) + " " + Files.getLastModifiedTime(outputFile).toMillis()); // Tachyon
++    }
++
++    // Tachyon start
++    private void loadVerified(Path outputDir) {
++        Path file = outputDir.resolve(VERIFIED_FILE);
++        if (!Files.isRegularFile(file)) {
++            return;
++        }
++        try {
++            for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
++                int tab = line.indexOf('\t');
++                if (tab > 0) {
++                    verified.put(line.substring(0, tab), line.substring(tab + 1));
++                }
++            }
++        } catch (IOException ignored) {
++            verified.clear(); // im Zweifel alles neu pruefen
++        }
++    }
++
++    private void saveVerified(Path outputDir) {
++        StringBuilder sb = new StringBuilder();
++        verifiedNew.forEach((k, v) -> sb.append(k).append('\t').append(v).append('\n'));
++        try {
++            Files.writeString(outputDir.resolve(VERIFIED_FILE), sb.toString(), StandardCharsets.UTF_8);
++        } catch (IOException ignored) {
++        }
++    }
++
++    /**
++     * Schreibt bundler/tachyon-launch.args. Damit kann start.bat den Server direkt ueber den
++     * Classpath starten (java @bundler/tachyon-launch.args nogui). Nur so funktioniert Javas
++     * AOT-Cache, der den Start deutlich beschleunigt - Klassen aus einem URLClassLoader kann er nicht cachen.
++     */
++    private static void writeLaunchArgs(Path outputDir, List<URL> urls, String mainClassName) {
++        try {
++            Path cwd = Paths.get("").toAbsolutePath();
++            StringBuilder cp = new StringBuilder();
++            for (URL url : urls) {
++                Path p = Paths.get(url.toURI());
++                String s = (p.startsWith(cwd) ? cwd.relativize(p) : p).toString().replace('\\', '/');
++                if (cp.length() > 0) {
++                    cp.append(java.io.File.pathSeparatorChar);
++                }
++                cp.append(s);
++            }
++            String args = "-cp \"" + cp + "\"\n" + mainClassName + "\n";
++            Files.writeString(outputDir.resolve("tachyon-launch.args"), args, StandardCharsets.UTF_8);
++        } catch (Exception e) {
++            System.out.println("Konnte tachyon-launch.args nicht schreiben: " + e);
+         }
+     }
++    // Tachyon end
+ 
+     private void extractJar(String subdir, String jarPath, Path outputFile) throws IOException {
+         Files.createDirectories(outputFile.getParent());
+@@ -126,7 +201,7 @@ public class Main {
+                 return true;
+             }
+ 
+-            System.out.printf("Expected file %s to have hash %s, but got %s%n", new Object[]{file, expectedHash, actualHash});
++            // Tachyon - still: Datei wird einfach neu entpackt (z.B. nach einem Update)
+         }
+         return false;
+     }
+diff --git a/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java b/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java
+index e44f048ff..f2c7685e9 100644
+--- a/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java
++++ b/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java
+@@ -24,6 +24,9 @@ public class TerminalConsoleWriterThread extends Thread {
+     public void run() {
+         String message;
+ 
++        // Tachyon - Farben nur in echten Terminals; Pipes/Panels bekommen das klassische Format
++        dev.tachyon.console.TachyonConsole.consoleReady();
++        final boolean color = Main.useJline && reader != null && !reader.getTerminal().getType().startsWith(org.jline.terminal.Terminal.TYPE_DUMB);
+         // Using name from log4j config in vanilla jar
+         while (true) {
+             message = LogQueues.getNextLogEvent("TerminalConsole");
+@@ -31,6 +34,10 @@ public class TerminalConsoleWriterThread extends Thread {
+                 continue;
+             }
+ 
++            if (dev.tachyon.console.TachyonConsole.handleStartupLine(message, color)) { // Tachyon - ruhiger Start mit Ladebalken
++                continue;
++            }
++            message = dev.tachyon.console.TachyonConsole.formatLine(message, color); // Tachyon
+             try {
+                 if (Main.useJline) {
+                     reader.printAbove(message);
+diff --git a/src/main/java/org/spigotmc/SpigotConfig.java b/src/main/java/org/spigotmc/SpigotConfig.java
+index 044e2a0d3..af1a7b19e 100644
+--- a/src/main/java/org/spigotmc/SpigotConfig.java
++++ b/src/main/java/org/spigotmc/SpigotConfig.java
+@@ -70,6 +70,7 @@ public class SpigotConfig
+ 
+         commands = new HashMap<String, Command>();
+         commands.put( "spigot", new SpigotCommand( "spigot" ) );
++        commands.put( "wm", new dev.tachyon.world.WorldManagerCommand( "wm" ) ); // Tachyon
+ 
+         version = getInt( "config-version", 12 );
+         set( "config-version", 12 );
+@@ -80,10 +81,10 @@ public class SpigotConfig
+     {
+         for ( Map.Entry<String, Command> entry : commands.entrySet() )
+         {
+-            MinecraftServer.getServer().server.getCommandMap().register( entry.getKey(), "Spigot", entry.getValue() );
++            MinecraftServer.getServer().server.getCommandMap().register( entry.getKey(), entry.getValue() instanceof dev.tachyon.world.WorldManagerCommand ? "tachyon" : "Spigot", entry.getValue() ); // Tachyon
+         }
+ 
+-        if ( metrics == null )
++        if ( false && metrics == null ) // Tachyon - MCStats-Metrics (veraltet, meldet als "Spigot") deaktiviert
+         {
+             try
+             {
+diff --git a/src/main/resources/log4j2.xml b/src/main/resources/log4j2.xml
+index 0ff3f750f..941d3351a 100644
+--- a/src/main/resources/log4j2.xml
++++ b/src/main/resources/log4j2.xml
+@@ -2,13 +2,14 @@
+ <Configuration status="WARN">
+     <Appenders>
+         <Console name="SysOut" target="SYSTEM_OUT">
+-            <PatternLayout pattern="[%d{HH:mm:ss}] [%t/%level]: %msg{nolookups}%n" />
++            <ThresholdFilter level="${sys:tachyon.startupLevel:-ERROR}" onMatch="ACCEPT" onMismatch="DENY"/>
++            <PatternLayout pattern="&#13;[%d{HH:mm:ss}] [%t/%level]: %msg{nolookups}%n" />
+         </Console>
+         <Queue name="ServerGuiConsole">
+             <PatternLayout pattern="[%d{HH:mm:ss} %level]: %msg{nolookups}%n" />
+         </Queue>
+         <Queue name="TerminalConsole">
+-            <PatternLayout pattern="[%d{HH:mm:ss}] [%t/%level]: %msg{nolookups}%n" />
++            <PatternLayout pattern="%d{HH:mm:ss}&#9;%level&#9;%t&#9;%msg{nolookups}%n" />
+         </Queue>
+         <RollingRandomAccessFile name="File" fileName="logs/latest.log" filePattern="logs/%d{yyyy-MM-dd}-%i.log.gz">
+             <PatternLayout pattern="[%d{HH:mm:ss}] [%t/%level]: %msg{nolookups}%n" />
+@@ -20,6 +21,9 @@
+         </RollingRandomAccessFile>
+     </Appenders>
+     <Loggers>
++        <Logger name="oshi" level="warn" additivity="false">
++            <AppenderRef ref="File"/>
++        </Logger>
+         <Root level="info">
+             <filters>
+                 <MarkerFilter marker="NETWORK_PACKETS" onMatch="DENY" onMismatch="NEUTRAL" />
+diff --git a/src/main/resources/tachyon/server-icon.png b/src/main/resources/tachyon/server-icon.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..f86e4b5fc16a9980013c06ac72c0baf4156aaf0b
+GIT binary patch
+literal 7423
+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
+
+literal 0
+HcmV?d00001
+

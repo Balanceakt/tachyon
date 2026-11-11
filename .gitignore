@@ -1,0 +1,23 @@
+# Gebaute Jars enthalten Mojang-Code - niemals hochladen
+*.jar
+!benchmark/bench-plugin/TachyonBench.jar
+
+# Build- und Laufzeitordner
+build/
+tachyon-libs/
+bundler/
+libraries/
+logs/
+world*/
+benchmark/run/
+benchmark/ergebnisse/
+benchmark/*.log
+*.aot
+*.aot.sig
+*.aot.config
+eula.txt
+server.properties
+*.yml
+!benchmark/bench-plugin/src/plugin.yml
+__pycache__/
+*.pyc
