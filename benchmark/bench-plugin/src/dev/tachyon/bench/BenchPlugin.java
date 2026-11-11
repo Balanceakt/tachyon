@@ -1,6 +1,7 @@
 package dev.tachyon.bench;
 
 import java.lang.reflect.Method;
+import java.util.List;
 import java.util.Locale;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
@@ -85,9 +86,49 @@ public final class BenchPlugin extends JavaPlugin {
             case "createworld" -> createWorld(args.length > 1 ? args[1] : "bench_world");
             case "mem" -> mem();
             case "events" -> events(args.length > 1 ? Integer.parseInt(args[1]) : 2_000_000);
+            case "chunks" -> chunks(args.length > 1 ? Integer.parseInt(args[1]) : 5);
             default -> sender.sendMessage("unbekannt");
         }
         return true;
+    }
+
+    /**
+     * Wie Spieler, die neues Gelaende erkunden: (2r+1)^2 noch nie generierte Chunks per Ticket laden
+     * und messen, wie lange es dauert und wie stark der Server dabei ruckelt.
+     */
+    private void chunks(int radius) {
+        World w = Bukkit.getWorlds().get(0);
+        int base = 2000; // weit weg vom Spawn: garantiert neue Chunks
+        List<int[]> coords = new java.util.ArrayList<>();
+        // Stoppuhr VOR dem Setzen der Tickets starten: Spigot laedt dabei bereits synchron
+        resetWindow();
+        lastTick = System.nanoTime();
+        long start = System.nanoTime();
+        for (int x = -radius; x <= radius; x++) {
+            for (int z = -radius; z <= radius; z++) {
+                coords.add(new int[]{base + x, base + z});
+                w.addPluginChunkTicket(base + x, base + z, this);
+            }
+        }
+        int[] taskId = new int[1];
+        taskId[0] = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
+            int loaded = 0;
+            for (int[] c : coords) {
+                if (w.isChunkLoaded(c[0], c[1])) {
+                    loaded++;
+                }
+            }
+            double secs = (System.nanoTime() - start) / 1e9;
+            if (loaded < coords.size() && secs < 300) {
+                return;
+            }
+            Bukkit.getScheduler().cancelTask(taskId[0]);
+            for (int[] c : coords) {
+                w.removePluginChunkTicket(c[0], c[1], this);
+            }
+            result("chunks", String.format(Locale.ROOT, "loaded=%d total=%d seconds=%.1f tps=%.2f freeze_ms=%.1f",
+                    loaded, coords.size(), secs, ticks / Math.max(0.001, secs), maxIntervalNanos / 1e6));
+        }, 1L, 1L);
     }
 
     private void idle(int seconds) {

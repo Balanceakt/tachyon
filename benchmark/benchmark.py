@@ -85,7 +85,8 @@ class Server:
 
     def base_cmd(self):
         # Gleiche JVM-Grundeinstellungen fuer alle Varianten, damit der Vergleich fair ist
-        return [self.java, f"-Xms{self.xmx}", f"-Xmx{self.xmx}", "--enable-native-access=ALL-UNNAMED", *self.extra_jvm]
+        return [self.java, f"-Xms{self.xmx}", f"-Xmx{self.xmx}", "--enable-native-access=ALL-UNNAMED",
+                "-Dtachyon.language=de", "-Dtachyon.verboseStartup=true", *self.extra_jvm]
 
     def extract(self):
         subprocess.run([*self.base_cmd(), "-DbundlerMainClass=", "-jar", "server.jar"], cwd=self.dir,
@@ -330,8 +331,8 @@ def report(results, args):
 
 def main():
     ap = argparse.ArgumentParser(description="Benchmark: Original-Spigot gegen Tachyon")
-    ap.add_argument("--original", default=str(ROOT / "spigot-26.3.jar"))
-    ap.add_argument("--tachyon", default=str(ROOT / "tachyon-26.3.jar"))
+    ap.add_argument("--original", default=str(ROOT / "Spigot-Original" / "spigot-26.3.jar"))
+    ap.add_argument("--tachyon", default=str(ROOT / "Tachyon" / "tachyon-26.3.jar"))
     ap.add_argument("--java", default=str(DEFAULT_JAVA))
     ap.add_argument("--xmx", default="2G")
     ap.add_argument("--warm-runs", type=int, default=2)

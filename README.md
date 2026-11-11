@@ -37,6 +37,22 @@ Tachyon räumt damit auf – gemessen, nicht geschätzt:
 
 > Die Zahlen kommen aus [`benchmark/benchmark.py`](benchmark/benchmark.py) – lass es auf deinem Rechner laufen und überzeug dich selbst.
 
+### 📊 Wenig Leistung, viel Leistung – alle Statistiken
+
+Wie gut kommt Tachyon mit **1, 2 oder 3 CPU-Kernen**, einer **schwachen CPU** und **96 MB bis 8 GB RAM** klar – im direkten Vergleich mit Spigot?
+
+<p align="center"><img src="assets/stats/lowres-welt-erstellen.png" width="100%"></p>
+
+| | Spigot | Tachyon |
+|---|---:|---:|
+| Welt erstellen auf **1 schwachen Kern** | 12,5 – 14,8 s Hänger | **0,6 – 1,1 s** |
+| Welt erstellen auf **1 Kern** | 6,4 – 8,7 s Hänger | **0,16 – 0,27 s** |
+| 121 Chunks auf **1 schwachen Kern** (384 / 512 MB) | 35,4 s | **32,8 s / 19,7 s** |
+| Welt erstellen mit **dem ganzen PC** | 1,3 s Hänger | **0,15 s** |
+| Kleinster lauffähiger RAM | 192 – 256 MB | 192 – 256 MB |
+
+➡️ **[Alle Statistiken, Grafiken und Messbedingungen in STATS.md](STATS.md)**
+
 ---
 
 ## Was Tachyon besser macht
@@ -121,7 +137,7 @@ Beim ersten Start fragt Tachyon in der Konsole nach der Sprache. Alle Tachyon-Te
 Kein „eula.txt bearbeiten und neu starten“ mehr: Tachyon fragt beim ersten Start „EULA akzeptieren? (ja/nein)“ und **startet direkt weiter**.
 
 ### 📊 `/tps` und Befehle im Look großer Server
-`/tps` zeigt TPS (1/5/15 min), MSPT inklusive Spitzenwert, RAM und Welt-Statistiken – mit Farbverlauf-Präfix, Balken und Ampelfarben. Alle Tachyon-Meldungen nutzen denselben Stil.
+`/tps` zeigt TPS (1/5/15 min), MSPT inklusive Spitzenwert, RAM, **CPU-Last von Server und System, aktive Worker-Threads** und wie Tachyon die Ressourcen **dynamisch** steuert (RAM-Bereich, gerade reserviert, Rückgabe im Leerlauf) – mit Farbverlauf-Präfix, Balken und Ampelfarben. Alle Tachyon-Meldungen nutzen denselben Stil.
 
 ### 🧠 Dynamische Leistung
 In `Start-Tachyon.bat` legst du einen **Bereich** fest – `RAM_MIN`, `RAM_MAX` und optional `CPU_MAX`. Der Server startet klein, holt sich Speicher, wenn er ihn braucht, und **gibt ihn im Leerlauf wieder ans System zurück** (periodische, nebenläufige G1-Läufe – ohne Pausen im Spiel). Ohne Spieler pausiert Minecraft außerdem das Ticken (`pause-when-empty-seconds`).

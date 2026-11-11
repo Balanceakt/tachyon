@@ -990,10 +990,10 @@ index 000000000..052d7bf9b
 +}
 diff --git a/src/main/java/dev/tachyon/world/WorldManager.java b/src/main/java/dev/tachyon/world/WorldManager.java
 new file mode 100644
-index 000000000..c3de9d5bc
+index 000000000..1e2b07b2e
 --- /dev/null
 +++ b/src/main/java/dev/tachyon/world/WorldManager.java
-@@ -0,0 +1,981 @@
+@@ -0,0 +1,984 @@
 +package dev.tachyon.world;
 +
 +import java.io.File;
@@ -1177,6 +1177,9 @@ index 000000000..c3de9d5bc
 +        fastForPlugins = config.getBoolean("world-manager.fast-world-creation-for-plugins");
 +        fastStartup = config.getBoolean("startup.fast-start");
 +        preloadRadius = Math.max(0, Math.min(8, config.getInt("world-manager.spawn-preload-radius")));
++        if (Runtime.getRuntime().maxMemory() < 400L * 1024 * 1024) {
++            preloadRadius = 0; // sehr wenig RAM: nur den Spawn-Chunk vorladen, damit es nicht knapp wird
++        }
 +        autoloadInterval = Math.max(1, config.getInt("world-manager.autoload-interval-ticks"));
 +        pregenParallel = Math.max(1, Math.min(256, config.getInt("world-manager.pregen-parallel-chunks")));
 +        saveConfig();
@@ -3063,10 +3066,10 @@ index 2891e2537..6830d544d 100644
      }
  
 diff --git a/src/main/java/org/spigotmc/TicksPerSecondCommand.java b/src/main/java/org/spigotmc/TicksPerSecondCommand.java
-index f5b6dec1c..f7b6f7104 100644
+index f5b6dec1c..159462667 100644
 --- a/src/main/java/org/spigotmc/TicksPerSecondCommand.java
 +++ b/src/main/java/org/spigotmc/TicksPerSecondCommand.java
-@@ -23,20 +23,68 @@ public class TicksPerSecondCommand extends Command
+@@ -23,20 +23,118 @@ public class TicksPerSecondCommand extends Command
          {
              return true;
          }
@@ -3112,6 +3115,35 @@ index f5b6dec1c..f7b6f7104 100644
 +        sender.sendMessage( m + " RAM     " + dev.tachyon.text.Style.bar( sender, used / (double) rt.maxMemory(), 12, dev.tachyon.text.Style.C_ACCENT2 )
 +                + " " + tx + ChatColor.BOLD + mb( used ) + m + " / " + mb( rt.maxMemory() )
 +                + m + "   " + dev.tachyon.i18n.Lang.t( "tps.ram.reserved", mb( rt.totalMemory() ) ) );
++        // Tachyon start - CPU-Auslastung und dynamische Steuerung
++        double procCpu = -1, sysCpu = -1;
++        if ( java.lang.management.ManagementFactory.getOperatingSystemMXBean() instanceof com.sun.management.OperatingSystemMXBean os )
++        {
++            procCpu = os.getProcessCpuLoad();
++            sysCpu = os.getCpuLoad();
++        }
++        int cores = rt.availableProcessors();
++        int workers = 0;
++        for ( Thread t : Thread.getAllStackTraces().keySet() )
++        {
++            if ( t.getName().startsWith( "Worker-Main" ) && t.getState() == Thread.State.RUNNABLE )
++            {
++                workers++;
++            }
++        }
++        int maxWorkers = Math.max( 1, Math.min( cores - 1, 255 ) );
++        sender.sendMessage( m + " CPU     " + dev.tachyon.text.Style.bar( sender, Math.max( 0, procCpu ), 12, cpuColor( procCpu ) )
++                + " " + dev.tachyon.text.Style.col( sender, cpuColor( procCpu ) ) + ChatColor.BOLD + pct( procCpu )
++                + m + "   " + dev.tachyon.i18n.Lang.t( "tps.cpu.details", pct( sysCpu ), cores, workers, maxWorkers ) );
++        long minHeap = java.lang.management.ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getInit();
++        String periodic = vmOption( "G1PeriodicGCInterval" );
++        String release = ( periodic != null && !periodic.equals( "0" ) )
++                ? dev.tachyon.i18n.Lang.t( "tps.dynamic.release.on", Long.parseLong( periodic ) / 1000 )
++                : dev.tachyon.i18n.Lang.t( "tps.dynamic.release.off" );
++        sender.sendMessage( m + " " + dev.tachyon.i18n.Lang.t( "tps.dynamic.label" ) + tx
++                + dev.tachyon.i18n.Lang.t( "tps.dynamic.range", mb( minHeap ), mb( rt.maxMemory() ) ) + sep
++                + dev.tachyon.i18n.Lang.t( "tps.dynamic.reserved", mb( rt.totalMemory() ) ) + sep + release );
++        // Tachyon end
 +        sender.sendMessage( m + " " + dev.tachyon.i18n.Lang.t( "tps.world.label" ) + tx
 +                + dev.tachyon.i18n.Lang.t( "tps.world", org.bukkit.Bukkit.getWorlds().size() ) + sep + dev.tachyon.i18n.Lang.t( "tps.chunks", chunks )
 +                + sep + dev.tachyon.i18n.Lang.t( "tps.entities", entities ) + sep
@@ -3126,6 +3158,27 @@ index f5b6dec1c..f7b6f7104 100644
 +    {
 +        double v = Math.min( 20.0, tps );
 +        return dev.tachyon.text.Style.col( sender, dev.tachyon.text.Style.tpsColor( v ) ) + format1( v );
++    }
++
++    private static String pct(double load)
++    {
++        return load < 0 ? "?" : String.format( java.util.Locale.ROOT, "%.0f %%", load * 100 );
++    }
++
++    private static String cpuColor(double load)
++    {
++        return load < 0.6 ? dev.tachyon.text.Style.C_GOOD : load < 0.85 ? dev.tachyon.text.Style.C_WARN : dev.tachyon.text.Style.C_BAD;
++    }
++
++    private static String vmOption(String name)
++    {
++        try
++        {
++            return java.lang.management.ManagementFactory.getPlatformMXBean( com.sun.management.HotSpotDiagnosticMXBean.class ).getVMOption( name ).getValue();
++        } catch ( Exception e )
++        {
++            return null;
++        }
 +    }
 +
 +    private static String format1(double v)
@@ -3176,10 +3229,10 @@ index 0ff3f750f..941d3351a 100644
                  <MarkerFilter marker="NETWORK_PACKETS" onMatch="DENY" onMismatch="NEUTRAL" />
 diff --git a/src/main/resources/tachyon/lang/de.properties b/src/main/resources/tachyon/lang/de.properties
 new file mode 100644
-index 000000000..ac06c98e2
+index 000000000..243586c67
 --- /dev/null
 +++ b/src/main/resources/tachyon/lang/de.properties
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,177 @@
 +# Tachyon - deutsche Texte
 +console.tagline=Minecraft-Server ohne Lags
 +console.ram=RAM
@@ -3351,12 +3404,18 @@ index 000000000..ac06c98e2
 +live.phase.search=Spawn suchen
 +live.phase.spawn=Spawnbereich generieren
 +live.pregen=Pregen '%s'  ·  %s Chunks/s  ·  noch %s
++tps.cpu.details=System %s  ·  %d Kerne  ·  Worker aktiv %d/%d
++tps.dynamic.label=Dynamik 
++tps.dynamic.range=RAM %s bis %s
++tps.dynamic.reserved=gerade reserviert %s
++tps.dynamic.release.on=Rueckgabe im Leerlauf alle %d s
++tps.dynamic.release.off=Rueckgabe im Leerlauf aus
 diff --git a/src/main/resources/tachyon/lang/en.properties b/src/main/resources/tachyon/lang/en.properties
 new file mode 100644
-index 000000000..ad6ddb92f
+index 000000000..09c4ef86a
 --- /dev/null
 +++ b/src/main/resources/tachyon/lang/en.properties
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,177 @@
 +# Tachyon - English texts
 +console.tagline=Minecraft server without lag
 +console.ram=RAM
@@ -3528,6 +3587,12 @@ index 000000000..ad6ddb92f
 +live.phase.search=searching spawn
 +live.phase.spawn=generating spawn area
 +live.pregen=Pregen '%s'  ·  %s chunks/s  ·  %s left
++tps.cpu.details=system %s  ·  %d cores  ·  workers active %d/%d
++tps.dynamic.label=Dynamic 
++tps.dynamic.range=RAM %s to %s
++tps.dynamic.reserved=currently reserved %s
++tps.dynamic.release.on=returned when idle every %d s
++tps.dynamic.release.off=return when idle off
 diff --git a/src/main/resources/tachyon/server-icon.png b/src/main/resources/tachyon/server-icon.png
 new file mode 100644
 index 0000000000000000000000000000000000000000..f86e4b5fc16a9980013c06ac72c0baf4156aaf0b
