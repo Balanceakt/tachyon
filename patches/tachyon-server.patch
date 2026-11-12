@@ -39,10 +39,10 @@ index 000000000..60f72ddb8
 +}
 diff --git a/src/main/java/dev/tachyon/console/TachyonConsole.java b/src/main/java/dev/tachyon/console/TachyonConsole.java
 new file mode 100644
-index 000000000..6b330850d
+index 000000000..9ed6d989e
 --- /dev/null
 +++ b/src/main/java/dev/tachyon/console/TachyonConsole.java
-@@ -0,0 +1,646 @@
+@@ -0,0 +1,661 @@
 +package dev.tachyon.console;
 +
 +import dev.tachyon.Tachyon;
@@ -161,7 +161,7 @@ index 000000000..6b330850d
 +    }
 +
 +    private static double uptimeSeconds() {
-+        return ManagementFactory.getRuntimeMXBean().getUptime() / 1000.0;
++        return Math.max(0, ManagementFactory.getRuntimeMXBean().getUptime() - promptNanos / 1_000_000) / 1000.0;
 +    }
 +
 +    public static boolean isStartupActive() {
@@ -228,7 +228,19 @@ index 000000000..6b330850d
 +    // ------------------------------------------------------------------ Fragen in der Konsole (erster Start)
 +
 +    /** Liest eine Zeile direkt von der Konsole (vor dem Start von jline). null = keine Eingabe moeglich. */
++    /** Zeit, die der Start auf Eingaben gewartet hat (Sprache, EULA) - zaehlt nicht zur Startzeit. */
++    private static volatile long promptNanos;
++
 +    private static String readLine() {
++        long waitStart = System.nanoTime();
++        try {
++            return readLine0();
++        } finally {
++            promptNanos += System.nanoTime() - waitStart;
++        }
++    }
++
++    private static String readLine0() {
 +        try {
 +            StringBuilder sb = new StringBuilder();
 +            int b;
@@ -679,6 +691,9 @@ index 000000000..6b330850d
 +        if (msg.startsWith("[WorldManager] ✔")) {
 +            return GREEN + BOLD + "✔" + RESET + GREEN + msg.substring("[WorldManager] ✔".length());
 +        }
++        if (msg.startsWith("[RAM]")) {
++            return MAGENTA + BOLD + "⇄ RAM" + RESET + MAGENTA + msg.substring("[RAM]".length());
++        }
 +        if (msg.startsWith("[WorldManager]") || msg.startsWith("[Tachyon]")) {
 +            int close = msg.indexOf(']');
 +            return CYAN + BOLD + msg.substring(0, close + 1) + RESET + CYAN + msg.substring(close + 1);
@@ -831,6 +846,270 @@ index 000000000..03718385d
 +        }
 +    }
 +}
+diff --git a/src/main/java/dev/tachyon/perf/AotTrainer.java b/src/main/java/dev/tachyon/perf/AotTrainer.java
+new file mode 100644
+index 000000000..08f4e6e45
+--- /dev/null
++++ b/src/main/java/dev/tachyon/perf/AotTrainer.java
+@@ -0,0 +1,258 @@
++package dev.tachyon.perf;
++
++import static dev.tachyon.i18n.Lang.t;
++
++import java.io.File;
++import java.io.IOException;
++import java.lang.management.ManagementFactory;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.LinkOption;
++import java.nio.file.Path;
++import java.nio.file.Paths;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Locale;
++import java.util.logging.Level;
++import java.util.logging.Logger;
++import java.util.stream.Stream;
++
++/**
++ * Erstellt Javas Start-Cache (AOT) im Hintergrund, ohne den Start zu bremsen.
++ *
++ * Frueher lief vor dem ersten Start nach einem Update ein ~40 s langes Training. Jetzt startet der Server sofort
++ * ohne Cache (~7 s) und Tachyon startet danach mit niedriger Prioritaet eine zweite, unsichtbare Java-Instanz:
++ * gleiche Jar, gleiche JVM-Einstellungen, aber eigener Ordner (tachyon-libs/aot-training) mit Mini-Welt und
++ * Port 0 - sie beruehrt weder Welten noch Konfiguration oder Logs des echten Servers. Sie faehrt kurz hoch,
++ * beendet sich, und Java schreibt dabei den Cache. Ab dem naechsten Start ist Tachyon in ~3 s bereit.
++ *
++ * Das Startskript fordert das an (-Dtachyon.aotTrain=true) und legt in tachyon-libs/aot.wanted die Signatur
++ * (Jar + JVM-Flags) ab. Nur wenn der Cache wirklich fertig ist, wird sie nach tachyon.aot.sig kopiert.
++ */
++public final class AotTrainer {
++
++    private static final Logger LOG = Logger.getLogger("Tachyon");
++    private static final boolean REQUESTED = Boolean.getBoolean("tachyon.aotTrain");
++    private static final String LAUNCH_ARGS = System.getProperty("bundlerRepoDir", "tachyon-libs") + "/tachyon-launch.args";
++    private static boolean started;
++
++    private AotTrainer() {
++    }
++
++    /** Nach "bereit" vom Server aufgerufen. */
++    public static synchronized void startIfRequested() {
++        if (!REQUESTED || started) {
++            return;
++        }
++        started = true;
++        Thread thread = new Thread(AotTrainer::run, "Tachyon-AOT");
++        thread.setDaemon(true);
++        thread.setPriority(Thread.MIN_PRIORITY);
++        thread.start();
++    }
++
++    private static void run() {
++        try {
++            Path server = Paths.get("").toAbsolutePath();
++            Path libs = server.resolve(System.getProperty("bundlerRepoDir", "tachyon-libs"));
++            Path wanted = libs.resolve("aot.wanted");
++            if (!Files.isRegularFile(wanted) || !Files.isRegularFile(libs.resolve("tachyon-launch.args"))) {
++                return;
++            }
++            Path dir = libs.resolve("aot-training");
++            Files.createDirectories(dir);
++            Path lock = dir.resolve("running.lock");
++            if (otherTrainingRunning(lock)) {
++                LOG.info("[Tachyon] " + t("aot.bg.already"));
++                return;
++            }
++            prepareDirectory(server, libs, dir);
++            boolean windows = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
++            Path out = server.resolve("tachyon.aot.new");
++            Files.deleteIfExists(out);
++            writeArgs(dir, out);
++            Path script = windows ? writeCmd(dir, server, out) : writeSh(dir, server, out);
++
++            ProcessBuilder pb = windows ? new ProcessBuilder("cmd", "/c", script.toString()) : new ProcessBuilder("sh", script.toString());
++            pb.directory(dir.toFile());
++            pb.redirectInput(ProcessBuilder.Redirect.from(new File(windows ? "NUL" : "/dev/null")));
++            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
++            pb.redirectErrorStream(true);
++            long t0 = System.nanoTime();
++            Process process = pb.start();
++            Files.writeString(lock, Long.toString(process.pid()), StandardCharsets.UTF_8);
++            LOG.info("[Tachyon] " + t("aot.bg.start"));
++
++            int rc = process.waitFor();
++            double secs = (System.nanoTime() - t0) / 1e9;
++            Path aot = server.resolve("tachyon.aot");
++            if (rc == 0 && Files.isRegularFile(aot) && Files.isRegularFile(server.resolve("tachyon.aot.sig"))) {
++                LOG.info("[Tachyon] ✔ " + t("aot.bg.done", secs, Files.size(aot) / (1024 * 1024)));
++            } else {
++                LOG.warning("[Tachyon] " + t("aot.bg.failed", dir.resolve("train.log")));
++            }
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        } catch (Throwable e) {
++            LOG.log(Level.WARNING, "[Tachyon] " + t("aot.bg.failed", e.getMessage()), e);
++        }
++    }
++
++    private static boolean otherTrainingRunning(Path lock) {
++        try {
++            if (!Files.isRegularFile(lock)) {
++                return false;
++            }
++            long pid = Long.parseLong(Files.readString(lock, StandardCharsets.UTF_8).trim());
++            return ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
++        } catch (Exception e) {
++            return false;
++        }
++    }
++
++    /**
++     * Trainingsordner: eigene Mini-Welt, Port 0, Schlafmodus aus. Der Classpath in tachyon-launch.args ist relativ
++     * ("tachyon-libs/..."), darum zeigt aot-training/tachyon-libs als Verknuepfung auf den echten Ordner - so
++     * stimmen die Pfade im Cache exakt mit denen des echten Servers ueberein.
++     */
++    private static void prepareDirectory(Path server, Path libs, Path dir) throws IOException, InterruptedException {
++        // Alte Trainingswelt/Logs loeschen (ohne der Verknuepfung zu folgen!)
++        try (Stream<Path> entries = Files.list(dir)) {
++            for (Path p : (Iterable<Path>) entries::iterator) {
++                String name = p.getFileName().toString();
++                if (name.startsWith("world") || name.equals("logs")) {
++                    deleteTree(p);
++                }
++            }
++        }
++        Path link = dir.resolve(libs.getFileName().toString());
++        if (!Files.exists(link)) {
++            if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) {
++                Process p = new ProcessBuilder("cmd", "/c", "mklink", "/J", link.toString(), libs.toString())
++                        .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
++                p.waitFor();
++            } else {
++                Files.createSymbolicLink(link, libs);
++            }
++        }
++        if (!Files.exists(link.resolve("tachyon-launch.args"))) {
++            throw new IOException("link " + link + " failed");
++        }
++        Path eula = server.resolve("eula.txt");
++        if (Files.isRegularFile(eula)) {
++            Files.copy(eula, dir.resolve("eula.txt"), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
++        }
++        Files.writeString(dir.resolve("server.properties"), String.join("\n",
++                "server-port=0", "online-mode=false", "enable-query=false", "enable-rcon=false", "management-server-enabled=false",
++                "spawn-protection=0", "view-distance=6", "simulation-distance=4", "sync-chunk-writes=false", "") , StandardCharsets.UTF_8);
++        Files.writeString(dir.resolve("tachyon.yml"), String.join("\n",
++                "language: " + dev.tachyon.i18n.Lang.code(), "sleep-mode:", "  enabled: false", "performance:", "  release-ram-when-empty: false", ""),
++                StandardCharsets.UTF_8);
++        Files.writeString(dir.resolve("README.txt"),
++                "Tachyon: Ordner fuer das Erstellen des Start-Caches (AOT). Wird automatisch verwaltet - kann geloescht werden.\n"
++                        + "Tachyon: folder used to build the startup cache (AOT). Managed automatically - safe to delete.\n", StandardCharsets.UTF_8);
++    }
++
++    /** JVM-Argumente des laufenden Servers uebernehmen (der Cache passt nur zu denselben Einstellungen) + Aufzeichnung. */
++    private static void writeArgs(Path dir, Path out) throws IOException {
++        List<String> args = new ArrayList<>();
++        for (String a : ManagementFactory.getRuntimeMXBean().getInputArguments()) {
++            if (a.startsWith("-Xms") || a.startsWith("-Dtachyon.") || a.startsWith("-XX:AOTCache") || a.startsWith("-XX:AOTMode")
++                    || a.startsWith("-Djava.class.path") || a.startsWith("-DbundlerMainClass")) {
++                continue;
++            }
++            args.add(a);
++        }
++        args.add("-Xms64m");
++        args.add("-Xlog:aot*=warning");
++        args.add("-XX:+UnlockDiagnosticVMOptions");
++        args.add("-XX:+AOTStreamableObjects");
++        args.add("-XX:AOTCacheOutput=" + out);
++        args.add("-Dtachyon.aotTraining=true");
++        args.add("-Dtachyon.verboseStartup=true");
++        StringBuilder sb = new StringBuilder();
++        for (String a : args) {
++            sb.append(a.indexOf(' ') >= 0 || a.indexOf('\\') >= 0 ? "\"" + a.replace("\\", "/") + "\"" : a).append('\n');
++        }
++        Files.writeString(dir.resolve("train.args"), sb.toString(), StandardCharsets.UTF_8);
++    }
++
++    private static String java() {
++        return ProcessHandle.current().info().command().orElse(Paths.get(System.getProperty("java.home"), "bin", "java").toString());
++    }
++
++    private static Path writeCmd(Path dir, Path server, Path out) throws IOException {
++        String java = java();
++        String run = "start \"\" /low /b /wait \"" + java + "\" %EXTRA% @train.args @" + LAUNCH_ARGS + " nogui --nojline --noconsole < nul >> train.log 2>&1";
++        // nur gueltig, wenn der Trainings-Server wirklich hochgefahren ist ("Done (") und Java einen Cache geschrieben hat
++        String check = "findstr /c:\"Done (\" train.log >nul && if exist \"" + out + "\" for %%F in (\"" + out + "\") do if %%~zF GTR 0 goto ok";
++        String s = String.join("\r\n",
++                "@echo off",
++                "cd /d \"%~dp0\"",
++                "echo Tachyon AOT %date% %time%> train.log",
++                "set EXTRA=",
++                run,
++                check,
++                "del /q \"" + out + "\" 2>nul",
++                "echo --- retry without AOTClassLinking>> train.log",
++                "set EXTRA=-XX:-AOTClassLinking",
++                run,
++                check,
++                "echo FAILED>> train.log",
++                "del /q running.lock 2>nul",
++                "exit /b 1",
++                ":ok",
++                "move /y \"" + out + "\" \"" + server.resolve("tachyon.aot") + "\" >nul",
++                "copy /y \"" + server.resolve("tachyon-libs").resolve("aot.wanted") + "\" \"" + server.resolve("tachyon.aot.sig") + "\" >nul",
++                "echo OK>> train.log",
++                "del /q running.lock 2>nul",
++                "exit /b 0", "");
++        Path f = dir.resolve("train.cmd");
++        Files.writeString(f, s, StandardCharsets.UTF_8);
++        return f;
++    }
++
++    private static Path writeSh(Path dir, Path server, Path out) throws IOException {
++        String java = java();
++        String s = String.join("\n",
++                "#!/bin/sh",
++                "cd \"$(dirname \"$0\")\"",
++                "echo \"Tachyon AOT $(date)\" > train.log",
++                "N=''; command -v nice >/dev/null && N='nice -n 10'",
++                "$N \"" + java + "\" @train.args @" + LAUNCH_ARGS + " nogui --nojline --noconsole </dev/null >> train.log 2>&1",
++                "if [ ! -s '" + out + "' ] || ! grep -q 'Done (' train.log; then",
++                "  rm -f '" + out + "'",
++                "  echo '--- retry without AOTClassLinking' >> train.log",
++                "  $N \"" + java + "\" -XX:-AOTClassLinking @train.args @" + LAUNCH_ARGS + " nogui --nojline --noconsole </dev/null >> train.log 2>&1",
++                "fi",
++                "if [ -s '" + out + "' ] && grep -q 'Done (' train.log; then",
++                "  mv -f '" + out + "' '" + server.resolve("tachyon.aot") + "'",
++                "  cp -f '" + server.resolve("tachyon-libs").resolve("aot.wanted") + "' '" + server.resolve("tachyon.aot.sig") + "'",
++                "  echo OK >> train.log; rm -f running.lock; exit 0",
++                "fi",
++                "echo FAILED >> train.log; rm -f running.lock; exit 1", "");
++        Path f = dir.resolve("train.sh");
++        Files.writeString(f, s, StandardCharsets.UTF_8);
++        return f;
++    }
++
++    /** Loescht einen Ordner, folgt dabei aber keinen Verknuepfungen. */
++    private static void deleteTree(Path p) throws IOException {
++        if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(p) && !isJunction(p)) {
++            try (Stream<Path> s = Files.list(p)) {
++                for (Path c : (Iterable<Path>) s::iterator) {
++                    deleteTree(c);
++                }
++            }
++        }
++        Files.deleteIfExists(p);
++    }
++
++    private static boolean isJunction(Path p) {
++        try {
++            return !p.toRealPath().equals(p.toAbsolutePath().normalize());
++        } catch (IOException e) {
++            return true;
++        }
++    }
++}
 diff --git a/src/main/java/dev/tachyon/perf/DynamicPerformance.java b/src/main/java/dev/tachyon/perf/DynamicPerformance.java
 new file mode 100644
 index 000000000..48eadfe7f
@@ -952,6 +1231,286 @@ index 000000000..48eadfe7f
 +
 +    public static double lastMspt() {
 +        return lastMspt;
++    }
++}
+diff --git a/src/main/java/dev/tachyon/perf/MemoryManager.java b/src/main/java/dev/tachyon/perf/MemoryManager.java
+new file mode 100644
+index 000000000..cd49ea9ce
+--- /dev/null
++++ b/src/main/java/dev/tachyon/perf/MemoryManager.java
+@@ -0,0 +1,274 @@
++package dev.tachyon.perf;
++
++import static dev.tachyon.i18n.Lang.t;
++
++import java.lang.management.ManagementFactory;
++import java.lang.management.MemoryMXBean;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.Paths;
++import java.util.Base64;
++import java.util.Locale;
++import java.util.Properties;
++import java.util.logging.Level;
++import java.util.logging.Logger;
++import javax.management.ObjectName;
++import net.minecraft.network.protocol.status.ServerStatus;
++import net.minecraft.server.MinecraftServer;
++
++/**
++ * RAM-Steuerung von Tachyon: gibt Speicher zurueck, wenn niemand online ist, und legt den Server
++ * auf Wunsch ganz schlafen.
++ *
++ * Stufe 1 - RAM zurueckgeben: Ist der Server eine Minute leer, raeumt Tachyon einmal gruendlich auf
++ * (volle Speicherbereinigung) und gibt den frei gewordenen Speicher ans Betriebssystem zurueck.
++ * Ohne Spieler stoert die kurze Pause niemanden.
++ *
++ * Stufe 2 - Schlafmodus: Ist der Server sleep-mode.after-minutes leer, speichert er alles und beendet Java.
++ * Das Startskript startet dann einen winzigen Waechter, der den Port belegt, in der Serverliste
++ * "schlaeft" anzeigt und Tachyon wieder startet, sobald jemand joinen will. Der RAM des Servers ist
++ * in dieser Zeit komplett frei, die Welten liegen nur noch auf der SSD/HDD.
++ */
++public final class MemoryManager {
++
++    /** Exit-Code fuer "schlafen gehen" - das Startskript startet daraufhin den Waechter. */
++    public static final int SLEEP_EXIT_CODE = 75;
++    /** Nur die Tachyon-Startskripte koennen den Server wieder aufwecken - ohne sie schlaeft er nie ein. */
++    private static final boolean LAUNCHER = Boolean.getBoolean("tachyon.sleepLauncher");
++    private static final boolean AOT_TRAINING = Boolean.getBoolean("tachyon.aotTraining");
++    /** Nur zum Testen: Sekunden statt Minuten bis zum Einschlafen. */
++    private static final long TEST_SLEEP_SECONDS = Long.getLong("tachyon.sleepAfterSeconds", 0L);
++    private static final long TRIM_AFTER_MS = Long.getLong("tachyon.trimAfterSeconds", 60L) * 1000L;
++    private static final Logger LOG = Logger.getLogger("Tachyon");
++
++    private static boolean trimEnabled = true;
++    private static boolean sleepEnabled = true;
++    private static int sleepAfterMinutes = 15;
++
++    private static int ticks;
++    private static long emptySince = -1;
++    private static boolean trimmed;
++    private static volatile boolean trimRunning;
++    private static boolean sleeping;
++    private static boolean infoShown;
++    private static int exitCode;
++
++    private MemoryManager() {
++    }
++
++    public static void configure(boolean trim, boolean sleep, int afterMinutes) {
++        trimEnabled = trim;
++        sleepEnabled = sleep;
++        sleepAfterMinutes = Math.max(1, afterMinutes);
++    }
++
++    /** Kurz vor System.exit: Hinweis, falls Java jetzt noch den Start-Cache schreibt (erster Start nach einem Update). */
++    public static void beforeExit() {
++        try {
++            for (String arg : ManagementFactory.getRuntimeMXBean().getInputArguments()) {
++                if (arg.startsWith("-XX:AOTCacheOutput")) {
++                    LOG.info("[Tachyon] " + t("aot.writing"));
++                    break;
++                }
++            }
++        } catch (Throwable ignored) {
++        }
++    }
++
++    /** Exit-Code fuer System.exit am Ende des Server-Stopps (0 = normal beendet). */
++    public static int exitCode() {
++        return exitCode;
++    }
++
++    /** true, wenn der Schlafmodus eingeschaltet ist und ein Tachyon-Startskript den Server wieder wecken kann. */
++    public static boolean sleepActive() {
++        return sleepEnabled && LAUNCHER && !AOT_TRAINING;
++    }
++
++    public static boolean isSleepEnabled() {
++        return sleepEnabled;
++    }
++
++    public static boolean isTrimEnabled() {
++        return trimEnabled;
++    }
++
++    public static int sleepAfterMinutes() {
++        return sleepAfterMinutes;
++    }
++
++    public static boolean hasLauncher() {
++        return LAUNCHER;
++    }
++
++    private static long sleepAfterMs() {
++        return TEST_SLEEP_SECONDS > 0 ? TEST_SLEEP_SECONDS * 1000L : sleepAfterMinutes * 60_000L;
++    }
++
++    /** @return Minuten bis zum Einschlafen (fuer /tps), -1 = es ist jemand online oder der Schlafmodus ist aus */
++    public static long minutesUntilSleep() {
++        if (!sleepActive() || emptySince < 0) {
++            return -1;
++        }
++        long left = sleepAfterMs() - (System.currentTimeMillis() - emptySince);
++        return Math.max(0, (left + 59_999) / 60_000);
++    }
++
++    /** Jeden Tick vom World-Manager aufgerufen - auch waehrend der Server pausiert (niemand online). */
++    public static void tick() {
++        if (sleeping || AOT_TRAINING || ++ticks % 20 != 0) {
++            return;
++        }
++        MinecraftServer server = MinecraftServer.getServer();
++        if (!infoShown) {
++            infoShown = true;
++            if (sleepEnabled && !LAUNCHER) {
++                LOG.info("[RAM] " + t("ram.sleep.no_launcher"));
++            }
++        }
++        if (server.getPlayerCount() > 0) {
++            emptySince = -1;
++            trimmed = false;
++            return;
++        }
++        long now = System.currentTimeMillis();
++        if (emptySince < 0) {
++            emptySince = now;
++        }
++        long idle = now - emptySince;
++        dev.tachyon.world.WorldManager wm = dev.tachyon.world.WorldManager.get();
++        if (wm != null && wm.isBusy()) {
++            emptySince = now; // Weltgenerierung / Pregen laeuft - nicht stoeren, Leerlauf beginnt erst danach
++            return;
++        }
++        if (trimEnabled && !trimmed && idle >= TRIM_AFTER_MS) {
++            trimmed = true;
++            trimAsync(idle / 60_000);
++        }
++        if (sleepActive() && idle >= sleepAfterMs()) {
++            goToSleep(server, idle);
++        }
++    }
++
++    // ------------------------------------------------------------------ Stufe 1: RAM zurueckgeben
++
++    /** Volle Speicherbereinigung im Hintergrund-Thread, danach Meldung, wie viel RAM ans System zurueckging. */
++    private static void trimAsync(long idleMinutes) {
++        if (trimRunning) {
++            return;
++        }
++        trimRunning = true;
++        Thread thread = new Thread(() -> {
++            try {
++                MemoryMXBean mem = ManagementFactory.getMemoryMXBean();
++                long before = mem.getHeapMemoryUsage().getCommitted();
++                long start = System.nanoTime();
++                if (!fullGc()) {
++                    return;
++                }
++                trimNativeHeap();
++                long after = mem.getHeapMemoryUsage().getCommitted();
++                long used = mem.getHeapMemoryUsage().getUsed();
++                long ms = (System.nanoTime() - start) / 1_000_000;
++                long freed = before - after;
++                if (freed >= 16L * 1024 * 1024) {
++                    LOG.info("[RAM] " + t("ram.trim.done", Math.max(1, idleMinutes), mb(before), mb(after), mb(freed), mb(used), ms));
++                } else {
++                    long floor = mem.getHeapMemoryUsage().getInit();
++                    LOG.info("[RAM] " + t("ram.trim.minimal", mb(after), mb(used), mb(floor)));
++                }
++            } catch (Throwable e) {
++                LOG.log(Level.FINE, "RAM trim failed", e);
++            } finally {
++                trimRunning = false;
++            }
++        }, "Tachyon-RAM");
++        thread.setDaemon(true);
++        thread.start();
++    }
++
++    /**
++     * Volle GC ueber das Diagnose-Kommando "GC.run". Anders als System.gc() greift das auch bei
++     * -XX:+DisableExplicitGC (das verhindert nur, dass Plugins staendig System.gc() aufrufen).
++     * G1 verkleinert danach den Heap (bis RAM_MIN) und gibt den Rest ans Betriebssystem zurueck.
++     */
++    private static boolean fullGc() {
++        try {
++            ManagementFactory.getPlatformMBeanServer().invoke(new ObjectName("com.sun.management:type=DiagnosticCommand"),
++                    "gcRun", new Object[] { null }, new String[] { String[].class.getName() });
++            return true;
++        } catch (Exception e) {
++            LOG.log(Level.FINE, "GC.run not available", e);
++            return false;
++        }
++    }
++
++    /** Linux: auch den nativen Speicher (glibc malloc) zurueckgeben. Auf anderen Systemen gibt es das Kommando nicht. */
++    private static void trimNativeHeap() {
++        if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("linux")) {
++            return;
++        }
++        try {
++            ManagementFactory.getPlatformMBeanServer().invoke(new ObjectName("com.sun.management:type=DiagnosticCommand"),
++                    "systemTrimNativeHeap", new Object[] { null }, new String[] { String[].class.getName() });
++        } catch (Exception ignored) {
++            // aeltere JVM oder musl - egal
++        }
++    }
++
++    // ------------------------------------------------------------------ Stufe 2: Schlafmodus
++
++    private static void goToSleep(MinecraftServer server, long idleMs) {
++        sleeping = true;
++        exitCode = SLEEP_EXIT_CODE;
++        Runtime rt = Runtime.getRuntime();
++        long ram = rt.totalMemory() + nonHeapCommitted();
++        writeSleepInfo(server, ram);
++        long minutes = Math.max(1, idleMs / 60_000);
++        LOG.info("[RAM] 💤 " + t("ram.sleep.now", minutes, mb(ram)));
++        org.bukkit.Bukkit.shutdown();
++    }
++
++    private static long nonHeapCommitted() {
++        try {
++            return ManagementFactory.getMemoryMXBean().getNonHeapMemoryUsage().getCommitted();
++        } catch (Throwable e) {
++            return 0;
++        }
++    }
++
++    /** Alles, was der Waechter fuer die Serverliste braucht (er laeuft ohne die Server-Klassen). */
++    private static void writeSleepInfo(MinecraftServer server, long ram) {
++        try {
++            Properties p = new Properties();
++            ServerStatus.Version version = ServerStatus.Version.current();
++            p.setProperty("protocol", Integer.toString(version.protocol()));
++            p.setProperty("version", dev.tachyon.Tachyon.NAME + " " + dev.tachyon.Tachyon.MC_VERSION);
++            String motd = server.getMotd();
++            p.setProperty("motd", motd == null ? "" : motd.split("\n", 2)[0]);
++            p.setProperty("max-players", Integer.toString(server.getMaxPlayers()));
++            p.setProperty("port", Integer.toString(server.getPort()));
++            String ip = server.getLocalIp();
++            p.setProperty("ip", ip == null ? "" : ip);
++            p.setProperty("ram", Long.toString(ram));
++            p.setProperty("language", dev.tachyon.i18n.Lang.code());
++            ServerStatus status = server.getStatus();
++            if (status != null && status.favicon().isPresent()) {
++                p.setProperty("favicon", Base64.getEncoder().encodeToString(status.favicon().get().iconBytes()));
++            }
++            Path dir = Paths.get(System.getProperty("bundlerRepoDir", "tachyon-libs"));
++            Files.createDirectories(dir);
++            try (var out = Files.newBufferedWriter(dir.resolve("sleep.properties"), StandardCharsets.UTF_8)) {
++                p.store(out, "Tachyon sleep mode - written when the server goes to sleep");
++            }
++        } catch (Exception e) {
++            LOG.log(Level.WARNING, "[RAM] sleep.properties: " + e.getMessage(), e);
++        }
++    }
++
++    private static String mb(long bytes) {
++        double mb = bytes / (1024.0 * 1024.0);
++        return mb >= 1024 ? String.format(Locale.ROOT, "%.1f GB", mb / 1024.0) : String.format(Locale.ROOT, "%.0f MB", mb);
 +    }
 +}
 diff --git a/src/main/java/dev/tachyon/text/Style.java b/src/main/java/dev/tachyon/text/Style.java
@@ -1113,10 +1672,10 @@ index 000000000..052d7bf9b
 +}
 diff --git a/src/main/java/dev/tachyon/world/WorldManager.java b/src/main/java/dev/tachyon/world/WorldManager.java
 new file mode 100644
-index 000000000..521bf6a39
+index 000000000..d02380de8
 --- /dev/null
 +++ b/src/main/java/dev/tachyon/world/WorldManager.java
-@@ -0,0 +1,1065 @@
+@@ -0,0 +1,1085 @@
 +package dev.tachyon.world;
 +
 +import java.io.File;
@@ -1287,6 +1846,7 @@ index 000000000..521bf6a39
 +        if (++wm.pausedTicks % 200 == 0) {
 +            wm.unloadIdleWorlds();
 +        }
++        dev.tachyon.perf.MemoryManager.tick(); // RAM zurueckgeben / Schlafmodus
 +    }
 +
 +    /** Kern-Hook: einmal pro Server-Tick auf dem Main-Thread. */
@@ -1319,6 +1879,9 @@ index 000000000..521bf6a39
 +        config.addDefault("performance.min-simulation-distance", 4);
 +        config.addDefault("performance.mspt-high", 40.0);
 +        config.addDefault("performance.mspt-low", 25.0);
++        config.addDefault("performance.release-ram-when-empty", true);
++        config.addDefault("sleep-mode.enabled", true);
++        config.addDefault("sleep-mode.after-minutes", 15);
 +        config.options().copyDefaults(true);
 +        fastForPlugins = config.getBoolean("world-manager.fast-world-creation-for-plugins");
 +        fastStartup = config.getBoolean("startup.fast-start");
@@ -1331,6 +1894,8 @@ index 000000000..521bf6a39
 +        unloadIdleMinutes = Math.max(0, config.getInt("world-manager.unload-idle-minutes"));
 +        dev.tachyon.perf.DynamicPerformance.configure(config.getBoolean("performance.dynamic-simulation-distance"),
 +                config.getInt("performance.min-simulation-distance"), config.getDouble("performance.mspt-high"), config.getDouble("performance.mspt-low"));
++        dev.tachyon.perf.MemoryManager.configure(config.getBoolean("performance.release-ram-when-empty"),
++                config.getBoolean("sleep-mode.enabled"), config.getInt("sleep-mode.after-minutes"));
 +        saveConfig();
 +    }
 +
@@ -1422,6 +1987,7 @@ index 000000000..521bf6a39
 +            updateLiveBars();
 +        }
 +        dev.tachyon.perf.DynamicPerformance.tick();
++        dev.tachyon.perf.MemoryManager.tick();
 +        if (liveTicks % 200 == 0) {
 +            unloadIdleWorlds();
 +        }
@@ -1514,9 +2080,22 @@ index 000000000..521bf6a39
 +            if (now - since >= unloadIdleMinutes * 60_000L && unload(name, true) == null) {
 +                sleeping.add(name);
 +                lastOccupied.remove(name);
-+                logger.info("[WorldManager] " + t("wm.log.idle_unload", name, unloadIdleMinutes));
++                logger.info("[RAM] " + t("wm.log.idle_unload", name, unloadIdleMinutes));
 +            }
 +        }
++    }
++
++    /** @return true, solange Welten erstellt/geladen werden oder ein Pregen laeuft (dann nicht schlafen gehen) */
++    public boolean isBusy() {
++        if (pregen != null) {
++            return true;
++        }
++        for (LoadState st : states.values()) {
++            if (!st.ready) {
++                return true;
++            }
++        }
++        return false;
 +    }
 +
 +    /** @return Welten, die wegen Leerlauf ausgelagert wurden und bei Bedarf wieder laden */
@@ -2848,7 +3427,7 @@ index 4545f039c..71eb07325 100644
  
      public ServerClockManager clockManager() {
 diff --git a/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java b/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java
-index 9959efd62..a50641139 100644
+index 9959efd62..5ad7a4736 100644
 --- a/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java
 +++ b/src/main/java/net/minecraft/server/dedicated/DedicatedServer.java
 @@ -183,6 +183,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
@@ -2875,7 +3454,7 @@ index 9959efd62..a50641139 100644
          // CraftBukkit end
  
          if (!this.usesAuthentication()) {
-@@ -329,10 +332,12 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+@@ -329,10 +332,13 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
              this.services.nameToIdCache().resolveOfflineUsers(!this.usesAuthentication());
              DedicatedServer.LOGGER.info("Preparing level \"{}\"", this.getLevelIdName());
              this.loadLevel(storageSource.getLevelId()); // CraftBukkit
@@ -2885,10 +3464,21 @@ index 9959efd62..a50641139 100644
  
              DedicatedServer.LOGGER.info("Done ({})! For help, type \"help\"", s);
 +            dev.tachyon.console.TachyonConsole.ready(this.getPort()); // Tachyon
++            dev.tachyon.perf.AotTrainer.startIfRequested(); // Tachyon - Start-Cache im Hintergrund erstellen
              if (dedicatedserverproperties.announcePlayerAchievements != null) {
                  this.overworld().getGameRules().set(GameRules.SHOW_ADVANCEMENT_MESSAGES, dedicatedserverproperties.announcePlayerAchievements, this.overworld()); // CraftBukkit - per-world
              }
-@@ -726,7 +731,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+@@ -527,7 +533,8 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+             }
+         }
+ 
+-        System.exit(0); // CraftBukkit
++        dev.tachyon.perf.MemoryManager.beforeExit(); // Tachyon
++        System.exit(dev.tachyon.perf.MemoryManager.exitCode()); // CraftBukkit // Tachyon - 75 = schlafen gehen
+     }
+ 
+     @Override
+@@ -726,7 +733,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
  
      @Override
      public String getMotd() {
@@ -2897,7 +3487,7 @@ index 9959efd62..a50641139 100644
      }
  
      @Override
-@@ -898,6 +903,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+@@ -898,6 +905,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
      protected void stopServer() {
          this.notificationManager().serverShuttingDown();
          super.stopServer();
@@ -3030,10 +3620,10 @@ index 2c252ac4c..ede84998a 100644
              } catch (Throwable t) {
                  t.printStackTrace();
 diff --git a/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java b/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java
-index 02c6eb198..e44170796 100644
+index 02c6eb198..f92d2dbb8 100644
 --- a/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java
 +++ b/src/main/java/org/bukkit/craftbukkit/bootstrap/Main.java
-@@ -19,10 +19,19 @@ import java.nio.file.StandardCopyOption;
+@@ -19,11 +19,24 @@ import java.nio.file.StandardCopyOption;
  import java.security.DigestOutputStream;
  import java.security.MessageDigest;
  import java.util.ArrayList;
@@ -3051,9 +3641,14 @@ index 02c6eb198..e44170796 100644
 +    // Tachyon end
 +
      public static void main(String[] argv) {
++        if (argv.length > 0 && argv[0].equals("--tachyon-sleep")) { // Tachyon - Schlafmodus-Waechter
++            SleepWatcher.run();
++            return;
++        }
          new Main().run(argv);
      }
-@@ -32,18 +41,24 @@ public class Main {
+ 
+@@ -32,18 +45,24 @@ public class Main {
              String defaultMainClassName = readResource("main-class", BufferedReader::readLine);
              String mainClassName = System.getProperty("bundlerMainClass", defaultMainClassName);
  
@@ -3080,7 +3675,7 @@ index 02c6eb198..e44170796 100644
  
              if (mainClassName == null || mainClassName.isEmpty()) {
                  System.out.println("Empty main class specified, exiting");
-@@ -97,11 +112,89 @@ public class Main {
+@@ -97,11 +116,93 @@ public class Main {
      }
  
      private void checkAndExtractJar(String subdir, FileEntry entry, Path outputFile) throws Exception {
@@ -3104,6 +3699,10 @@ index 02c6eb198..e44170796 100644
 +
 +    // Tachyon start
 +    /** Sprache aus tachyon.yml (der Bootstrap laeuft vor dem eigentlichen Server). */
++    static boolean isGermanPublic() {
++        return isGerman();
++    }
++
 +    private static boolean isGerman() {
 +        try {
 +            Path config = Paths.get("tachyon.yml");
@@ -3173,7 +3772,7 @@ index 02c6eb198..e44170796 100644
  
      private void extractJar(String subdir, String jarPath, Path outputFile) throws IOException {
          Files.createDirectories(outputFile.getParent());
-@@ -126,7 +219,7 @@ public class Main {
+@@ -126,7 +227,7 @@ public class Main {
                  return true;
              }
  
@@ -3182,6 +3781,414 @@ index 02c6eb198..e44170796 100644
          }
          return false;
      }
+diff --git a/src/main/java/org/bukkit/craftbukkit/bootstrap/SleepWatcher.java b/src/main/java/org/bukkit/craftbukkit/bootstrap/SleepWatcher.java
+new file mode 100644
+index 000000000..566703116
+--- /dev/null
++++ b/src/main/java/org/bukkit/craftbukkit/bootstrap/SleepWatcher.java
+@@ -0,0 +1,402 @@
++package org.bukkit.craftbukkit.bootstrap;
++
++import java.io.BufferedInputStream;
++import java.io.BufferedReader;
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.DataInputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.InputStreamReader;
++import java.io.OutputStream;
++import java.io.Reader;
++import java.net.InetAddress;
++import java.net.InetSocketAddress;
++import java.net.ServerSocket;
++import java.net.Socket;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.Paths;
++import java.time.LocalTime;
++import java.time.format.DateTimeFormatter;
++import java.util.Locale;
++import java.util.Properties;
++
++/**
++ * Tachyon-Schlafmodus: der Waechter.
++ *
++ * Laeuft statt des Servers, solange dieser schlaeft (java -jar tachyon.jar --tachyon-sleep). Er braucht nur
++ * wenige MB RAM, haelt den Port offen, zeigt in der Serverliste "schlaeft - joinen zum Aufwecken" und beendet
++ * sich mit Exit-Code 10, sobald jemand joinen will. Das Startskript startet daraufhin Tachyon neu.
++ *
++ * Bewusst nur JDK-Klassen: kein Netty, kein Minecraft-Code - darum startet er in Bruchteilen einer Sekunde.
++ */
++final class SleepWatcher {
++
++    static final int EXIT_WAKE = 10;
++    static final int EXIT_STOP = 0;
++    private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss");
++
++    private final Properties info = new Properties();
++    private final boolean de;
++    private final boolean color;
++    private final long sleepingSince = System.currentTimeMillis();
++    private volatile ServerSocket socket;
++    private volatile int exitCode = -1;
++
++    private SleepWatcher() {
++        Path file = Paths.get(System.getProperty("bundlerRepoDir", "tachyon-libs"), "sleep.properties");
++        try (Reader r = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
++            info.load(r);
++        } catch (IOException ignored) {
++            // Ohne Datei: Werte aus server.properties bzw. Standardwerte
++        }
++        String lang = info.getProperty("language");
++        de = lang != null ? lang.equals("de") : Main.isGermanPublic();
++        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
++        color = System.console() != null && (!os.contains("win") || System.getenv("WT_SESSION") != null || System.getenv("ConEmuANSI") != null);
++    }
++
++    static void run() {
++        int code = new SleepWatcher().loop();
++        System.out.flush();
++        System.exit(code);
++    }
++
++    // ------------------------------------------------------------------ Hauptschleife
++
++    private int loop() {
++        int port = intValue("port", serverProperty("server-port", 25565));
++        String ip = info.getProperty("ip", serverProperty("server-ip", ""));
++        ServerSocket server = bind(ip, port);
++        if (server == null) {
++            say(c("93") + (de ? "  Port " + port + " ist belegt - der Waechter kann nicht lauschen. Server startet direkt wieder."
++                    : "  Port " + port + " is in use - the watcher cannot listen. Starting the server again.") + c("0"));
++            return EXIT_WAKE;
++        }
++        socket = server;
++        banner(port);
++
++        Thread console = new Thread(this::readConsole, "Tachyon-Sleep-Console");
++        console.setDaemon(true);
++        console.start();
++
++        while (exitCode < 0) {
++            Socket client;
++            try {
++                client = server.accept();
++            } catch (IOException e) {
++                break; // Socket geschlossen = aufwachen oder beenden
++            }
++            Thread.ofVirtual().start(() -> handle(client));
++        }
++        return exitCode < 0 ? EXIT_WAKE : exitCode;
++    }
++
++    private ServerSocket bind(String ip, int port) {
++        for (int attempt = 0; attempt < 40; attempt++) { // der Server gibt den Port evtl. erst einen Moment spaeter frei
++            try {
++                ServerSocket s = new ServerSocket();
++                s.setReuseAddress(true);
++                InetSocketAddress addr = ip == null || ip.isBlank() ? new InetSocketAddress(port) : new InetSocketAddress(InetAddress.getByName(ip), port);
++                s.bind(addr, 50);
++                return s;
++            } catch (IOException e) {
++                try {
++                    Thread.sleep(250);
++                } catch (InterruptedException ie) {
++                    return null;
++                }
++            }
++        }
++        return null;
++    }
++
++    private synchronized void finish(int code) {
++        if (exitCode >= 0) {
++            return;
++        }
++        exitCode = code;
++        try {
++            socket.close();
++        } catch (IOException ignored) {
++        }
++    }
++
++    // ------------------------------------------------------------------ Konsole
++
++    private void banner(int port) {
++        long ram = longValue("ram", 0);
++        String freed = ram > 0 ? String.format(Locale.ROOT, de ? "ca. %s" : "about %s", size(ram)) : (de ? "der gesamte Server-RAM" : "all server RAM");
++        say("");
++        say("   " + c("95;1") + (de ? "Zzz  TACHYON SCHLAEFT" : "Zzz  TACHYON IS SLEEPING") + c("0"));
++        say("   " + c("90") + "-".repeat(60) + c("0"));
++        say("   " + label(de ? "RAM frei" : "RAM freed") + c("92;1") + freed + c("0") + c("90") + (de ? "  (der Waechter selbst braucht ca. 30-40 MB)" : "  (the watcher itself needs about 30-40 MB)") + c("0"));
++        say("   " + label(de ? "Welten" : "Worlds") + (de ? "gespeichert auf der SSD/HDD" : "saved on disk"));
++        say("   " + label("Port") + port + c("90") + (de ? "  - in der Serverliste: \"schlaeft, joinen zum Aufwecken\"" : "  - server list shows \"sleeping, join to wake up\"") + c("0"));
++        say("   " + label(de ? "Aufwachen" : "Wake up") + (de ? "sobald ein Spieler joint (Start in wenigen Sekunden)" : "as soon as a player joins (starts in a few seconds)"));
++        say("   " + label(de ? "Befehle" : "Commands") + c("96") + "wake" + c("0") + (de ? " = jetzt aufwecken  |  " : " = wake up now  |  ") + c("96") + "stop" + c("0")
++                + (de ? " = ganz beenden" : " = shut down completely"));
++        say("");
++    }
++
++    private String label(String l) {
++        return c("90") + l + " ".repeat(Math.max(1, 12 - l.length())) + c("0");
++    }
++
++    private void readConsole() {
++        try {
++            BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
++            String line;
++            while ((line = in.readLine()) != null && exitCode < 0) {
++                String cmd = line.trim().toLowerCase(Locale.ROOT);
++                if (cmd.isEmpty()) {
++                    continue;
++                }
++                switch (cmd) {
++                    case "wake", "start", "aufwachen", "wach", "up" -> {
++                        log(c("92") + (de ? "Wird geweckt (Konsole)..." : "Waking up (console)...") + c("0"));
++                        finish(EXIT_WAKE);
++                    }
++                    case "stop", "end", "exit", "quit", "beenden" -> {
++                        log(de ? "Wird beendet." : "Shutting down.");
++                        finish(EXIT_STOP);
++                    }
++                    default -> log(de ? "Unbekannt. Befehle: wake = aufwecken, stop = beenden" : "Unknown. Commands: wake, stop");
++                }
++            }
++        } catch (IOException ignored) {
++            // keine Konsole (Panel ohne Eingabe) - dann weckt nur ein Join
++        }
++    }
++
++    private void say(String s) {
++        synchronized (System.out) {
++            System.out.println(s);
++        }
++    }
++
++    private void log(String msg) {
++        say(c("90") + LocalTime.now().format(TIME) + c("0") + " " + c("95") + "Zzz" + c("0") + " " + msg);
++    }
++
++    private String c(String code) {
++        return color ? "\u001B[" + code + "m" : "";
++    }
++
++    // ------------------------------------------------------------------ Minecraft-Protokoll (Handshake, Status, Login)
++
++    private void handle(Socket s) {
++        try (s) {
++            s.setSoTimeout(5000);
++            s.setTcpNoDelay(true);
++            InputStream in = new BufferedInputStream(s.getInputStream());
++            OutputStream out = s.getOutputStream();
++            in.mark(1);
++            int first = in.read();
++            if (first == -1 || first == 0xFE) {
++                return; // uralter Client-Ping - einfach schliessen
++            }
++            in.reset();
++            byte[] handshake = readPacket(in);
++            if (handshake == null) {
++                return;
++            }
++            DataInputStream hs = new DataInputStream(new ByteArrayInputStream(handshake));
++            if (readVarInt(hs) != 0x00) {
++                return;
++            }
++            int clientProtocol = readVarInt(hs);
++            readString(hs); // Adresse
++            hs.readUnsignedShort(); // Port
++            int next = readVarInt(hs);
++            if (next == 1) {
++                status(in, out, clientProtocol);
++            } else if (next == 2 || next == 3) {
++                login(in, out);
++            }
++        } catch (IOException ignored) {
++            // Verbindungsabbruch, Timeout, Portscanner - egal
++        }
++    }
++
++    private void status(InputStream in, OutputStream out, int clientProtocol) throws IOException {
++        byte[] request = readPacket(in);
++        if (request == null || request.length < 1 || request[0] != 0x00) {
++            return;
++        }
++        writePacket(out, 0x00, string(statusJson(clientProtocol)));
++        byte[] ping = readPacket(in);
++        if (ping != null && ping.length == 9 && ping[0] == 0x01) {
++            writeVarInt(out, ping.length);
++            out.write(ping); // Pong = gleiche Zahl zurueck
++            out.flush();
++        }
++    }
++
++    private void login(InputStream in, OutputStream out) throws IOException {
++        String name = "?";
++        byte[] hello = readPacket(in);
++        if (hello != null && hello.length > 1 && hello[0] == 0x00) {
++            name = readString(new DataInputStream(new ByteArrayInputStream(hello, 1, hello.length - 1)));
++        }
++        writePacket(out, 0x00, string(kickJson()));
++        String safe = name.replaceAll("[^A-Za-z0-9_]", "");
++        log(c("92") + (de ? safe + " will joinen - Tachyon wird geweckt..." : safe + " wants to join - waking Tachyon up...") + c("0"));
++        finish(EXIT_WAKE);
++    }
++
++    private String statusJson(int clientProtocol) {
++        int protocol = intValue("protocol", clientProtocol);
++        String version = info.getProperty("version", "Tachyon");
++        String motd = info.getProperty("motd", "§b⚡ Tachyon");
++        String line2 = de ? "§d☾ §7Server schläft §8· §ejoinen zum Aufwecken"
++                : "§d☾ §7Server is sleeping §8· §ejoin to wake it up";
++        StringBuilder sb = new StringBuilder(256);
++        sb.append("{\"version\":{\"name\":").append(json(version)).append(",\"protocol\":").append(protocol).append('}');
++        sb.append(",\"players\":{\"max\":").append(intValue("max-players", 20)).append(",\"online\":0,\"sample\":[]}");
++        sb.append(",\"description\":{\"text\":").append(json(motd + "\n" + line2)).append('}');
++        String favicon = info.getProperty("favicon");
++        if (favicon != null && !favicon.isEmpty()) {
++            sb.append(",\"favicon\":").append(json("data:image/png;base64," + favicon));
++        }
++        sb.append(",\"enforcesSecureChat\":false}");
++        return sb.toString();
++    }
++
++    private String kickJson() {
++        String a = de ? " wacht gerade auf!" : " is waking up!";
++        String b = de ? "Der Server war im Schlafmodus und startet jetzt.\nVerbinde dich in ein paar Sekunden erneut."
++                : "The server was sleeping and is starting now.\nJoin again in a few seconds.";
++        return "{\"text\":\"\",\"extra\":[{\"text\":\"⚡ Tachyon\",\"color\":\"aqua\",\"bold\":true},{\"text\":" + json(a + "\n\n")
++                + ",\"color\":\"white\"},{\"text\":" + json(b) + ",\"color\":\"gray\"}]}";
++    }
++
++    // ------------------------------------------------------------------ Hilfen
++
++    private static byte[] readPacket(InputStream in) throws IOException {
++        int len = readVarInt(in);
++        if (len <= 0 || len > 32 * 1024) {
++            return null;
++        }
++        byte[] data = in.readNBytes(len);
++        return data.length == len ? data : null;
++    }
++
++    private static void writePacket(OutputStream out, int id, byte[] payload) throws IOException {
++        ByteArrayOutputStream body = new ByteArrayOutputStream(payload.length + 5);
++        writeVarInt(body, id);
++        body.write(payload);
++        ByteArrayOutputStream frame = new ByteArrayOutputStream(body.size() + 5);
++        writeVarInt(frame, body.size());
++        body.writeTo(frame);
++        out.write(frame.toByteArray());
++        out.flush();
++    }
++
++    private static int readVarInt(InputStream in) throws IOException {
++        int value = 0;
++        for (int i = 0; i < 5; i++) {
++            int b = in.read();
++            if (b == -1) {
++                throw new IOException("EOF");
++            }
++            value |= (b & 0x7F) << (7 * i);
++            if ((b & 0x80) == 0) {
++                return value;
++            }
++        }
++        throw new IOException("VarInt too big");
++    }
++
++    private static void writeVarInt(OutputStream out, int value) throws IOException {
++        while ((value & ~0x7F) != 0) {
++            out.write((value & 0x7F) | 0x80);
++            value >>>= 7;
++        }
++        out.write(value);
++    }
++
++    private static String readString(InputStream in) throws IOException {
++        int len = readVarInt(in);
++        if (len < 0 || len > 1024) {
++            throw new IOException("bad string");
++        }
++        return new String(in.readNBytes(len), StandardCharsets.UTF_8);
++    }
++
++    private static byte[] string(String s) throws IOException {
++        byte[] b = s.getBytes(StandardCharsets.UTF_8);
++        ByteArrayOutputStream out = new ByteArrayOutputStream(b.length + 5);
++        writeVarInt(out, b.length);
++        out.write(b);
++        return out.toByteArray();
++    }
++
++    private static String json(String s) {
++        StringBuilder sb = new StringBuilder(s.length() + 2).append('"');
++        for (int i = 0; i < s.length(); i++) {
++            char ch = s.charAt(i);
++            switch (ch) {
++                case '"' -> sb.append("\\\"");
++                case '\\' -> sb.append("\\\\");
++                case '\n' -> sb.append("\\n");
++                case '\r' -> sb.append("\\r");
++                case '\t' -> sb.append("\\t");
++                default -> {
++                    if (ch < 0x20) {
++                        sb.append(String.format("\\u%04x", (int) ch));
++                    } else {
++                        sb.append(ch);
++                    }
++                }
++            }
++        }
++        return sb.append('"').toString();
++    }
++
++    private int intValue(String key, int def) {
++        try {
++            return Integer.parseInt(info.getProperty(key, "").trim());
++        } catch (NumberFormatException e) {
++            return def;
++        }
++    }
++
++    private long longValue(String key, long def) {
++        try {
++            return Long.parseLong(info.getProperty(key, "").trim());
++        } catch (NumberFormatException e) {
++            return def;
++        }
++    }
++
++    private static <T> T serverProperty(String key, T def) {
++        try {
++            Properties p = new Properties();
++            try (Reader r = Files.newBufferedReader(Paths.get("server.properties"), StandardCharsets.UTF_8)) {
++                p.load(r);
++            }
++            String v = p.getProperty(key);
++            if (v == null || v.isBlank()) {
++                return def;
++            }
++            if (def instanceof Integer) {
++                @SuppressWarnings("unchecked")
++                T t = (T) Integer.valueOf(v.trim());
++                return t;
++            }
++            @SuppressWarnings("unchecked")
++            T t = (T) v.trim();
++            return t;
++        } catch (Exception e) {
++            return def;
++        }
++    }
++
++    private static String size(long bytes) {
++        double mb = bytes / (1024.0 * 1024.0);
++        return mb >= 1024 ? String.format(Locale.ROOT, "%.1f GB", mb / 1024.0) : String.format(Locale.ROOT, "%.0f MB", mb);
++    }
++}
 diff --git a/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java b/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java
 index e44f048ff..83027c82e 100644
 --- a/src/main/java/org/bukkit/craftbukkit/util/TerminalConsoleWriterThread.java
@@ -3278,10 +4285,10 @@ index 2891e2537..6830d544d 100644
      }
  
 diff --git a/src/main/java/org/spigotmc/TicksPerSecondCommand.java b/src/main/java/org/spigotmc/TicksPerSecondCommand.java
-index f5b6dec1c..6385c71b4 100644
+index f5b6dec1c..c5e7c5000 100644
 --- a/src/main/java/org/spigotmc/TicksPerSecondCommand.java
 +++ b/src/main/java/org/spigotmc/TicksPerSecondCommand.java
-@@ -23,20 +23,126 @@ public class TicksPerSecondCommand extends Command
+@@ -23,20 +23,138 @@ public class TicksPerSecondCommand extends Command
          {
              return true;
          }
@@ -3363,6 +4370,18 @@ index f5b6dec1c..6385c71b4 100644
 +        dev.tachyon.world.WorldManager wmgr = dev.tachyon.world.WorldManager.get();
 +        int asleep = wmgr == null ? 0 : wmgr.sleepingWorlds().size();
 +        sender.sendMessage( m + " " + dev.tachyon.i18n.Lang.t( "tps.balance.label" ) + tx + sim + sep + dev.tachyon.i18n.Lang.t( "tps.balance.sleeping", asleep ) );
++        String sleepText;
++        if ( !dev.tachyon.perf.MemoryManager.isSleepEnabled() ) {
++            sleepText = dev.tachyon.i18n.Lang.t( "tps.sleep.off" );
++        } else if ( !dev.tachyon.perf.MemoryManager.hasLauncher() ) {
++            sleepText = dev.tachyon.i18n.Lang.t( "tps.sleep.no_launcher" );
++        } else {
++            long left = dev.tachyon.perf.MemoryManager.minutesUntilSleep();
++            sleepText = left >= 0 ? dev.tachyon.text.Style.col( sender, dev.tachyon.text.Style.C_WARN ) + dev.tachyon.i18n.Lang.t( "tps.sleep.countdown", left ) + tx
++                    : dev.tachyon.i18n.Lang.t( "tps.sleep.awake", dev.tachyon.perf.MemoryManager.sleepAfterMinutes() );
++        }
++        sender.sendMessage( m + " " + dev.tachyon.i18n.Lang.t( "tps.sleep.label" ) + tx + sleepText + sep
++                + dev.tachyon.i18n.Lang.t( dev.tachyon.perf.MemoryManager.isTrimEnabled() ? "tps.sleep.trim.on" : "tps.sleep.trim.off" ) );
 +        // Tachyon end
 +        sender.sendMessage( m + " " + dev.tachyon.i18n.Lang.t( "tps.world.label" ) + tx
 +                + dev.tachyon.i18n.Lang.t( "tps.world", org.bukkit.Bukkit.getWorlds().size() ) + sep + dev.tachyon.i18n.Lang.t( "tps.chunks", chunks )
@@ -3449,10 +4468,10 @@ index 0ff3f750f..941d3351a 100644
                  <MarkerFilter marker="NETWORK_PACKETS" onMatch="DENY" onMismatch="NEUTRAL" />
 diff --git a/src/main/resources/tachyon/lang/de.properties b/src/main/resources/tachyon/lang/de.properties
 new file mode 100644
-index 000000000..8fdff82b4
+index 000000000..0ed40ceed
 --- /dev/null
 +++ b/src/main/resources/tachyon/lang/de.properties
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,205 @@
 +# Tachyon - deutsche Texte
 +console.tagline=Minecraft-Server ohne Lags
 +console.ram=RAM
@@ -3514,6 +4533,8 @@ index 000000000..8fdff82b4
 +wm.log.resume_spawn=Setze unterbrochene Spawnsuche fuer '%s' fort...
 +wm.log.training_done=AOT-Training abgeschlossen - Server wird beendet, Java schreibt jetzt den Start-Cache...
 +wm.config.header=Tachyon Konfiguration\n\nlanguage: de oder en - Sprache aller Tachyon-Texte\nstartup.fast-start: true = nicht auf die Spawnsuche warten, sie laeuft nach 'Done' im Hintergrund\nworld-manager.fast-world-creation-for-plugins: true = auch Plugin-Welten (z.B. Multiverse) ohne Server-Haenger\nworld-manager.spawn-preload-radius: Chunks um den Spawn, die vor 'bereit' geladen werden\nworld-manager.autoload-interval-ticks: Abstand zwischen zwei Welten beim automatischen Laden\nworld-manager.pregen-parallel-chunks: gleichzeitige Chunks bei /wm pregen (pausiert automatisch bei Lag)\nworlds: wird vom /wm Befehl verwaltet\nworld-manager.unload-idle-minutes: Welten des World-Managers ohne Spieler nach so vielen Minuten auf die SSD auslagern (0 = aus)\nperformance.dynamic-simulation-distance: unter Last die Simulationsdistanz automatisch senken und spaeter wieder anheben\nperformance.min-simulation-distance / mspt-high / mspt-low: Untergrenze und Schwellen (ms pro Tick) der Lastregelung
++sleep-mode.enabled / after-minutes: Server ohne Spieler nach so vielen Minuten schlafen legen (RAM komplett frei), wacht beim Join auf - nur mit Start-Tachyon-Skript
++performance.release-ram-when-empty: nach 1 min ohne Spieler RAM ans System zurueckgeben
 +
 +# World-Manager (Fehler/Meldungen)
 +wm.err.invalid_name=Ungueltiger Weltname. Erlaubt: A-Z, a-z, 0-9, _ und - (max. 64 Zeichen).
@@ -3638,12 +4659,30 @@ index 000000000..8fdff82b4
 +tps.balance.sim.reduced=Simulation gedrosselt %d von %d Chunks
 +tps.balance.off=Lastregelung aus
 +tps.balance.sleeping=%d Welt(en) ausgelagert
++
++# RAM-Steuerung / Schlafmodus
++ram.trim.done=Server seit %d min leer - Speicher aufgeraeumt: reserviert %s -> %s (%s ans System zurueckgegeben, belegt %s, %d ms)
++ram.trim.minimal=Server leer - Speicher aufgeraeumt: reserviert %s, belegt %s (Untergrenze RAM_MIN %s erreicht)
++ram.sleep.now=Seit %d min niemand online - Server geht schlafen: Welten werden auf der SSD gespeichert, ca. %s RAM werden frei. Er wacht auf, sobald jemand joint.
++ram.sleep.no_launcher=Schlafmodus ist an, wirkt aber nur beim Start ueber Start-Tachyon.bat / start-tachyon.sh - der Server bleibt wach, nur die RAM-Rueckgabe ist aktiv.
++tps.sleep.label=Schlaf  
++tps.sleep.off=Schlafmodus aus
++tps.sleep.no_launcher=Schlafmodus nur mit Start-Tachyon-Skript
++tps.sleep.awake=schlaeft nach %d min ohne Spieler ein
++tps.sleep.countdown=niemand online - schlaeft in %d min ein
++tps.sleep.trim.on=RAM-Rueckgabe wenn leer an
++tps.sleep.trim.off=RAM-Rueckgabe wenn leer aus
++aot.writing=Java speichert jetzt einmalig den Start-Cache (ca. 10-20 s) - ab dem naechsten Start ist Tachyon in ca. 3 s bereit.
++aot.bg.start=Start-Cache wird im Hintergrund erstellt (ca. 30-60 s, niedrige Prioritaet) - ab dem naechsten Start ist Tachyon in ca. 3 s bereit.
++aot.bg.done=Start-Cache fertig nach %.0f s (%d MB) - der naechste Start dauert nur noch ca. 3 s.
++aot.bg.failed=Start-Cache konnte nicht erstellt werden (%s) - Tachyon startet trotzdem normal.
++aot.bg.already=Start-Cache wird bereits im Hintergrund erstellt.
 diff --git a/src/main/resources/tachyon/lang/en.properties b/src/main/resources/tachyon/lang/en.properties
 new file mode 100644
-index 000000000..d721b60ef
+index 000000000..7f4f0fb61
 --- /dev/null
 +++ b/src/main/resources/tachyon/lang/en.properties
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,205 @@
 +# Tachyon - English texts
 +console.tagline=Minecraft server without lag
 +console.ram=RAM
@@ -3705,6 +4744,8 @@ index 000000000..d721b60ef
 +wm.log.resume_spawn=Resuming interrupted spawn search for '%s'...
 +wm.log.training_done=AOT training finished - stopping the server, Java now writes the startup cache...
 +wm.config.header=Tachyon configuration\n\nlanguage: de or en - language of all Tachyon texts\nstartup.fast-start: true = don't wait for the spawn search, it runs in the background after 'Done'\nworld-manager.fast-world-creation-for-plugins: true = plugin worlds (e.g. Multiverse) are created without server freezes too\nworld-manager.spawn-preload-radius: chunks around spawn that are loaded before a world is 'ready'\nworld-manager.autoload-interval-ticks: delay between two worlds when loading automatically\nworld-manager.pregen-parallel-chunks: chunks generated at once by /wm pregen (pauses automatically on lag)\nworlds: managed by the /wm command\nworld-manager.unload-idle-minutes: offload world-manager worlds without players to disk after this many minutes (0 = off)\nperformance.dynamic-simulation-distance: lower the simulation distance under load and raise it again later\nperformance.min-simulation-distance / mspt-high / mspt-low: lower limit and thresholds (ms per tick) of the load control
++sleep-mode.enabled / after-minutes: put the server to sleep after this many minutes without players (frees all RAM), wakes up on join - start script required
++performance.release-ram-when-empty: return RAM to the system after 1 min without players
 +
 +# World manager (errors/messages)
 +wm.err.invalid_name=Invalid world name. Allowed: A-Z, a-z, 0-9, _ and - (max. 64 characters).
@@ -3829,6 +4870,24 @@ index 000000000..d721b60ef
 +tps.balance.sim.reduced=simulation throttled %d of %d chunks
 +tps.balance.off=load control off
 +tps.balance.sleeping=%d world(s) offloaded
++
++# RAM control / sleep mode
++ram.trim.done=Server empty for %d min - memory cleaned up: reserved %s -> %s (%s returned to the system, used %s, %d ms)
++ram.trim.minimal=Server empty - memory cleaned up: reserved %s, used %s (RAM_MIN floor %s reached)
++ram.sleep.now=Nobody online for %d min - server goes to sleep: worlds are saved to disk, about %s of RAM is freed. It wakes up as soon as someone joins.
++ram.sleep.no_launcher=Sleep mode is on but only works when started via Start-Tachyon.bat / start-tachyon.sh - the server stays awake, only RAM release is active.
++tps.sleep.label=Sleep  
++tps.sleep.off=sleep mode off
++tps.sleep.no_launcher=sleep mode needs the Start-Tachyon script
++tps.sleep.awake=sleeps after %d min without players
++tps.sleep.countdown=nobody online - sleeping in %d min
++tps.sleep.trim.on=RAM release when empty on
++tps.sleep.trim.off=RAM release when empty off
++aot.writing=Java is now saving the startup cache once (about 10-20 s) - from the next start on Tachyon is ready in about 3 s.
++aot.bg.start=Building the startup cache in the background (about 30-60 s, low priority) - from the next start on Tachyon is ready in about 3 s.
++aot.bg.done=Startup cache ready after %.0f s (%d MB) - the next start takes only about 3 s.
++aot.bg.failed=Startup cache could not be built (%s) - Tachyon still starts normally.
++aot.bg.already=Startup cache is already being built in the background.
 diff --git a/src/main/resources/tachyon/server-icon.png b/src/main/resources/tachyon/server-icon.png
 new file mode 100644
 index 0000000000000000000000000000000000000000..f86e4b5fc16a9980013c06ac72c0baf4156aaf0b

@@ -107,7 +107,9 @@ Dazu: `loadWorld`, `unloadWorld`, `deleteWorld`, `cloneWorld`, `whenReady`, `tel
 `/wm pregen world 5000` generiert die Welt im Voraus, damit beim Erkunden nichts mehr ruckelt. Der Pregenerator **pausiert automatisch**, sobald ein Tick länger als 50 ms dauert – Spieler haben immer Vorrang.
 
 ### 🚀 Turbo-Start mit Java-AOT-Cache
-`Start-Tachyon.bat` / `start-tachyon.sh` nutzen den **AOT-Cache von Java 25+** (Project Leyden). Beim ersten Mal trainiert Tachyon den Cache einmalig (~40 s), danach lädt Java alle Server-Klassen fertig gelinkt aus dem Cache: **Neustart in ~2,5 s statt ~7,5 s**.
+`Start-Tachyon.bat` / `start-tachyon.sh` nutzen den **AOT-Cache von Java 25+** (Project Leyden): Java lädt alle Server-Klassen fertig gelinkt aus dem Cache – **bereit in ~2,8 s statt ~7 s**.
+
+Nach einem Update wartest du **nicht** auf ein Training: Tachyon startet sofort ohne Cache (~7 s) und baut den Cache danach **im Hintergrund** – mit niedriger Priorität, in einer eigenen Mini-Welt (`tachyon-libs/aot-training`), ohne deine Welten, Logs oder Einstellungen anzufassen. Die Konsole meldet, wann er fertig ist; ab dem nächsten Start bist du wieder bei ~3 s.
 
 Damit das überhaupt geht, startet Tachyon den Server direkt über den Classpath statt über den Spigot-Bootstrap-Classloader – den kann Javas Cache nämlich nicht cachen.
 
@@ -141,6 +143,19 @@ Kein „eula.txt bearbeiten und neu starten“ mehr: Tachyon fragt beim ersten S
 
 ### 🧠 Dynamische Leistung
 In `Start-Tachyon.bat` legst du einen **Bereich** fest – `RAM_MIN`, `RAM_MAX` und optional `CPU_MAX`. Der Server startet klein, holt sich Speicher, wenn er ihn braucht, und **gibt ihn im Leerlauf wieder ans System zurück** (periodische, nebenläufige G1-Läufe – ohne Pausen im Spiel). Ohne Spieler pausiert Minecraft außerdem das Ticken (`pause-when-empty-seconds`).
+
+### 😴 Schlafmodus: leerer Server = 0 MB RAM
+Ist niemand online, gibt Tachyon in zwei Stufen RAM frei – und sagt es dir jeweils in der Konsole (`⇄ RAM …`):
+
+1. **Nach 1 Minute ohne Spieler:** einmal gründlich aufräumen und den freien Speicher ans Betriebssystem zurückgeben (bis zur Untergrenze `RAM_MIN`). Ohne Spieler merkt niemand die kurze Pause.
+2. **Nach 15 Minuten ohne Spieler:** Der Server **legt sich schlafen**. Er speichert alle Welten und beendet Java komplett – der gesamte Server-RAM ist frei, die Welten liegen nur noch auf der SSD/HDD. Ein winziger Wächter (~30–40 MB) hält den Port offen und zeigt in der Serverliste *„Server schläft · joinen zum Aufwecken“* mit deinem Icon.
+3. **Jemand joint:** Der Spieler bekommt *„Tachyon wacht gerade auf – verbinde dich in ein paar Sekunden erneut“*, und Tachyon ist dank AOT-Cache **in ~3 s wieder bereit** (gemessen: 2,9 s vom Join bis „bereit“).
+
+In der Wächter-Konsole: `wake` weckt sofort, `stop` beendet ganz. `/tps` zeigt, wann der Server einschläft.
+
+**Für Hoster** heißt das: Ein leerer Server kostet praktisch keinen RAM mehr. Auf einer Maschine passen so deutlich mehr Server, weil nur die gerade aktiven Speicher belegen.
+
+> Der Schlafmodus funktioniert nur mit `Start-Tachyon.bat` / `start-tachyon.sh` (die starten den Wächter und wecken den Server). Wird Tachyon anders gestartet, bleibt er wach – nur die RAM-Rückgabe läuft. Brauchst du Plugins, die auch ohne Spieler laufen müssen (z. B. Discord-Bots), schalte ihn mit `sleep-mode.enabled: false` aus.
 
 ### 💤 Leere Welten wandern auf die SSD
 Welten des World-Managers, in denen seit 10 Minuten niemand war, werden gespeichert und aus dem RAM genommen – auch wenn der Server ohne Spieler pausiert. Sobald jemand hin will (`/wm tp`, `/wm load` oder die Plugin-API), lädt Tachyon sie **ohne Server-Hänger** wieder (im Test: bereit nach 0,3 s). Standard- und Plugin-Welten bleiben unberührt. Einstellbar mit `world-manager.unload-idle-minutes` (0 = aus).
@@ -220,6 +235,10 @@ performance:
   min-simulation-distance: 4                # nie weiter runter als das
   mspt-high: 40.0                           # ab so vielen ms pro Tick wird gedrosselt
   mspt-low: 25.0                            # darunter geht es wieder hoch
+  release-ram-when-empty: true              # nach 1 min ohne Spieler RAM ans System zurückgeben
+sleep-mode:
+  enabled: true                             # Server ohne Spieler schlafen legen (nur mit Start-Skript)
+  after-minutes: 15                         # nach so vielen Minuten ohne Spieler
 ```
 
 ---
@@ -242,7 +261,7 @@ Startet beide Server nacheinander in eigenen Testordnern (gleicher Seed, gleiche
 | `patches/tachyon-server.patch` | Alle Änderungen am Server (World-Manager, Rechte, Sprachen, Konsole, Start, Fixes) |
 | `patches/tachyon-api.patch` | Tachyon-API für Plugins, paralleles Plugin-Laden, Event-Fix |
 | `build-tachyon.bat` / `.sh` | Baut die Jar lokal |
-| `Start-Tachyon.bat` / `start-tachyon.sh` | Startdateien mit AOT-Cache und G1-Tuning |
+| `Start-Tachyon.bat` / `start-tachyon.sh` | Startdateien mit AOT-Cache, G1-Tuning und Schlafmodus |
 | `benchmark/` | Vergleichs-Benchmark inkl. Mess-Plugin |
 
 ---

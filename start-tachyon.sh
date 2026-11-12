@@ -2,14 +2,17 @@
 # ==========================================================================
 #  Tachyon Server - Startskript fuer Linux / start script for Linux
 #
-#  - AOT-Cache (Neustarts ca. 3x schneller), G1-Tuning
+#  - AOT-Start-Cache: Start in ca. 3 s. Nach einem Update startet Tachyon sofort
+#    ohne Cache (ca. 7 s) und erstellt ihn im Hintergrund neu
 #  - dynamischer RAM: startet mit RAM_MIN, holt sich bei Bedarf bis RAM_MAX
 #    und gibt freien Speicher im Leerlauf wieder ans System zurueck
+#  - Schlafmodus: ohne Spieler legt sich der Server schlafen (RAM komplett frei)
+#    und wacht auf, sobald jemand joint (tachyon.yml: sleep-mode)
 #  - Sprache, EULA usw. fragt Tachyon beim ersten Start selbst
 #
 #  Beispiel: RAM_MAX=8G CPU_MAX=4 ./start-tachyon.sh
 # ==========================================================================
-set -euo pipefail
+set -uo pipefail
 
 JAR="${JAR:-tachyon-26.3.jar}"
 RAM_MIN="${RAM_MIN:-1G}"
@@ -30,9 +33,10 @@ FLAGS=(-Xms"$RAM_MIN" -Xmx"$RAM_MAX" -XX:G1PeriodicGCInterval=30000 -XX:MinHeapF
   -XX:MaxTenuringThreshold=1 -XX:+UseCompactObjectHeaders
   --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow)
 [[ "$CPU_MAX" != 0 ]] && FLAGS+=(-XX:ActiveProcessorCount="$CPU_MAX")
-
-# Nur fuers AOT-Training: Objekte streamen statt mappen (sonst scheitert das Training manchmal)
-AOTTRAIN=(-Xlog:aot*=error -Xlog:cds*=error -XX:+UnlockDiagnosticVMOptions -XX:+AOTStreamableObjects -Dtachyon.aotTraining=true -XX:AOTCacheOutput=tachyon.aot)
+# Schlafmodus: nur mit diesem Skript kann der Server wieder geweckt werden
+SLEEP=(-Dtachyon.sleepLauncher=true)
+# Waechter waehrend des Schlafs: winziges Java ohne JIT, ca. 30-40 MB RAM
+WATCH=(-Xms4m -Xmx16m -XX:+UseSerialGC -Xint -XX:-UsePerfData -Xss256k -XX:MaxMetaspaceSize=24m)
 
 command -v "$JAVA" >/dev/null || { msg "[FEHLER] Java 25+ nicht gefunden." "[ERROR] Java 25+ not found."; exit 1; }
 [[ -f "$JAR" ]] || { msg "[FEHLER] $JAR nicht gefunden." "[ERROR] $JAR not found."; exit 1; }
@@ -40,32 +44,40 @@ command -v "$JAVA" >/dev/null || { msg "[FEHLER] Java 25+ nicht gefunden." "[ERR
 # Bibliotheken entpacken, wenn die Jar neu/aktualisiert ist
 if [[ ! -f tachyon-libs/tachyon-launch.args || "$JAR" -nt tachyon-libs/tachyon-launch.args ]]; then
   msg "[INFO] Entpacke Bibliotheken..." "[INFO] Unpacking libraries..."
-  "$JAVA" "${FLAGS[@]}" -DbundlerMainClass= -jar "$JAR"
+  "$JAVA" -Xmx512m -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -DbundlerMainClass= -jar "$JAR"
 fi
 if [[ ! -f tachyon-libs/tachyon-launch.args ]]; then
   exec "$JAVA" "${FLAGS[@]}" -jar "$JAR" nogui
 fi
 
-# AOT-Cache trainieren: erst wenn die Welt existiert, erneut nach Jar-Update oder geaenderten JVM-Flags
-LEVEL="$(grep -E '^level-name=' server.properties 2>/dev/null | cut -d= -f2- || true)"
-LEVEL="${LEVEL:-world}"
-if [[ -f "$LEVEL/level.dat" ]]; then
-  if [[ ! -s tachyon.aot || "$JAR" -nt tachyon.aot || "$(cat tachyon.aot.flags 2>/dev/null)" != "${FLAGS[*]}" ]]; then
-    msg "[INFO] Einmaliges Training des Start-Caches (AOT), ca. 40 s - der Server faehrt kurz hoch und beendet sich wieder..." \
-        "[INFO] One-time training of the startup cache (AOT), about 40 s - the server starts briefly and stops again..."
-    rm -f tachyon.aot
-    "$JAVA" "${FLAGS[@]}" "${AOTTRAIN[@]}" @tachyon-libs/tachyon-launch.args nogui </dev/null 2>tachyon-libs/aot-training.log || true
-    if [[ ! -s tachyon.aot ]]; then
-      msg "[INFO] Volles Training nicht moeglich - nutze sichere Variante..." "[INFO] Full training not possible - using the safe variant..."
-      rm -f tachyon.aot
-      "$JAVA" "${FLAGS[@]}" "${AOTTRAIN[@]}" -XX:-AOTClassLinking @tachyon-libs/tachyon-launch.args nogui </dev/null 2>tachyon-libs/aot-training.log || true
-    fi
-    if [[ -s tachyon.aot ]]; then echo "${FLAGS[*]}" > tachyon.aot.flags; else rm -f tachyon.aot; fi
-  fi
-fi
+# Java im Vordergrund laufen lassen, aber Stop-Signale (Docker, Panels, systemd) sauber weiterreichen
+CHILD=0; STOPPING=0
+trap 'STOPPING=1; [[ $CHILD != 0 ]] && kill -TERM "$CHILD" 2>/dev/null' TERM INT
+run() {
+  "$@" <&0 &
+  CHILD=$!
+  local rc
+  while :; do
+    wait "$CHILD"; rc=$?
+    kill -0 "$CHILD" 2>/dev/null || break
+  done
+  CHILD=0
+  return $rc
+}
 
-if [[ -s tachyon.aot ]]; then
-  exec "$JAVA" "${FLAGS[@]}" -XX:AOTCache=tachyon.aot @tachyon-libs/tachyon-launch.args nogui
-else
-  exec "$JAVA" "${FLAGS[@]}" @tachyon-libs/tachyon-launch.args nogui
-fi
+while :; do
+  # Start-Cache (AOT) gueltig, solange Jar und JVM-Einstellungen gleich bleiben.
+  # Sonst startet Tachyon sofort ohne Cache und erstellt ihn danach im Hintergrund.
+  AOTSIG="$(stat -c '%s %Y' "$JAR" 2>/dev/null || stat -f '%z %m' "$JAR") ${FLAGS[*]}"
+  if [[ -s tachyon.aot && "$(cat tachyon.aot.sig 2>/dev/null)" == "$AOTSIG" ]]; then
+    run "$JAVA" "${FLAGS[@]}" "${SLEEP[@]}" -XX:AOTCache=tachyon.aot @tachyon-libs/tachyon-launch.args nogui
+  else
+    echo "$AOTSIG" > tachyon-libs/aot.wanted
+    run "$JAVA" "${FLAGS[@]}" "${SLEEP[@]}" -Dtachyon.aotTrain=true @tachyon-libs/tachyon-launch.args nogui
+  fi
+  RC=$?
+  # 75 = Server hat sich schlafen gelegt -> Waechter starten, beim Join wieder hochfahren
+  [[ $RC == 75 && $STOPPING == 0 ]] || exit $RC
+  run "$JAVA" "${WATCH[@]}" -jar "$JAR" --tachyon-sleep
+  [[ $? == 10 && $STOPPING == 0 ]] || exit 0
+done
