@@ -137,10 +137,18 @@ Beim ersten Start fragt Tachyon in der Konsole nach der Sprache. Alle Tachyon-Te
 Kein „eula.txt bearbeiten und neu starten“ mehr: Tachyon fragt beim ersten Start „EULA akzeptieren? (ja/nein)“ und **startet direkt weiter**.
 
 ### 📊 `/tps` und Befehle im Look großer Server
-`/tps` zeigt TPS (1/5/15 min), MSPT inklusive Spitzenwert, RAM, **CPU-Last von Server und System, aktive Worker-Threads** und wie Tachyon die Ressourcen **dynamisch** steuert (RAM-Bereich, gerade reserviert, Rückgabe im Leerlauf) – mit Farbverlauf-Präfix, Balken und Ampelfarben. Alle Tachyon-Meldungen nutzen denselben Stil.
+`/tps` zeigt TPS (1/5/15 min), MSPT inklusive Spitzenwert, RAM, **CPU-Last von Server und System, aktive Worker-Threads** und wie Tachyon die Ressourcen **dynamisch** steuert (RAM-Bereich, gerade reserviert, Rückgabe im Leerlauf, Lastregelung, ausgelagerte Welten) – mit Farbverlauf-Präfix, Balken und Ampelfarben. Alle Tachyon-Meldungen nutzen denselben Stil.
 
 ### 🧠 Dynamische Leistung
 In `Start-Tachyon.bat` legst du einen **Bereich** fest – `RAM_MIN`, `RAM_MAX` und optional `CPU_MAX`. Der Server startet klein, holt sich Speicher, wenn er ihn braucht, und **gibt ihn im Leerlauf wieder ans System zurück** (periodische, nebenläufige G1-Läufe – ohne Pausen im Spiel). Ohne Spieler pausiert Minecraft außerdem das Ticken (`pause-when-empty-seconds`).
+
+### 💤 Leere Welten wandern auf die SSD
+Welten des World-Managers, in denen seit 10 Minuten niemand war, werden gespeichert und aus dem RAM genommen – auch wenn der Server ohne Spieler pausiert. Sobald jemand hin will (`/wm tp`, `/wm load` oder die Plugin-API), lädt Tachyon sie **ohne Server-Hänger** wieder (im Test: bereit nach 0,3 s). Standard- und Plugin-Welten bleiben unberührt. Einstellbar mit `world-manager.unload-idle-minutes` (0 = aus).
+
+> Warum nicht einfach Arbeitsspeicher auf die SSD auslagern wie manche KI-Modelle? Weil ein Server alle 50 ms einen Tick fertig haben muss und kreuz und quer auf den Speicher zugreift – Auslagern (Swap) würde aus GC-Pausen von Millisekunden Sekunden machen. Ganze ungenutzte Welten auszulagern spart RAM ohne dieses Risiko.
+
+### ⚖️ Lastregelung gegen Lags
+Steigt die Tick-Zeit Richtung 50 ms (= Lag), verkleinert Tachyon automatisch und schrittweise die **Simulationsdistanz** – also den Bereich um Spieler, in dem Mobs, Redstone und Pflanzen berechnet werden. Die Sichtweite bleibt gleich. Ist wieder Luft, geht es schrittweise zurück auf deinen Wert. `/tps` zeigt den aktuellen Stand. Einstellbar unter `performance` in `tachyon.yml` (Untergrenze und Schwellen).
 
 ### 📦 Weniger Item- und XP-Entities
 Drops werden in einem größeren Radius zusammengefasst (Items 3,5 statt 2,5 Blöcke, XP 4,0 statt 3,0). Gerade bei Farmen heißt das deutlich weniger Entities pro Tick.
@@ -206,6 +214,12 @@ world-manager:
   spawn-preload-radius: 2                   # Chunks um den Spawn, die vor "bereit" geladen werden
   autoload-interval-ticks: 20               # Abstand beim automatischen Laden nach dem Start
   pregen-parallel-chunks: 40                # gleichzeitige Chunks bei /wm pregen
+  unload-idle-minutes: 10                   # leere Welten nach X Minuten auf die SSD auslagern (0 = aus)
+performance:
+  dynamic-simulation-distance: true         # unter Last Simulationsdistanz senken, danach wieder anheben
+  min-simulation-distance: 4                # nie weiter runter als das
+  mspt-high: 40.0                           # ab so vielen ms pro Tick wird gedrosselt
+  mspt-low: 25.0                            # darunter geht es wieder hoch
 ```
 
 ---

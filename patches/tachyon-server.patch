@@ -831,6 +831,129 @@ index 000000000..03718385d
 +        }
 +    }
 +}
+diff --git a/src/main/java/dev/tachyon/perf/DynamicPerformance.java b/src/main/java/dev/tachyon/perf/DynamicPerformance.java
+new file mode 100644
+index 000000000..48eadfe7f
+--- /dev/null
++++ b/src/main/java/dev/tachyon/perf/DynamicPerformance.java
+@@ -0,0 +1,117 @@
++package dev.tachyon.perf;
++
++import static dev.tachyon.i18n.Lang.t;
++
++import java.util.logging.Logger;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++
++/**
++ * Dynamische Lastregelung von Tachyon.
++ *
++ * Steigt die Tick-Zeit Richtung 50 ms (= Lag), verkleinert Tachyon schrittweise die Simulationsdistanz
++ * (Bereich um Spieler, in dem Mobs, Redstone, Pflanzen usw. berechnet werden). Die Sichtweite bleibt gleich.
++ * Ist wieder Luft, geht es schrittweise zurueck auf den eingestellten Wert.
++ */
++public final class DynamicPerformance {
++
++    private static final Logger LOG = Logger.getLogger("Tachyon");
++    private static final int CHECK_TICKS = 100;          // alle 5 s pruefen
++    private static final long RAISE_COOLDOWN_MS = 30_000; // nach einer Aenderung 30 s warten, bevor es wieder hoch geht
++
++    private static boolean enabled = true;
++    private static int minDistance = 4;
++    private static double msptHigh = 40;
++    private static double msptLow = 25;
++
++    private static int reduction;
++    private static long lastChange;
++    private static int ticks;
++    private static double lastMspt;
++
++    private DynamicPerformance() {
++    }
++
++    public static void configure(boolean on, int min, double high, double low) {
++        enabled = on;
++        minDistance = Math.max(2, min);
++        msptHigh = high;
++        msptLow = Math.min(low, high - 1);
++        if (!enabled && reduction > 0) {
++            reduction = 0;
++            apply();
++        }
++    }
++
++    /** Jeden Tick vom World-Manager aufgerufen. */
++    public static void tick() {
++        if (!enabled || ++ticks % CHECK_TICKS != 0) {
++            return;
++        }
++        MinecraftServer server = MinecraftServer.getServer();
++        double mspt = server.getAverageTickTimeNanos() / 1_000_000.0;
++        lastMspt = mspt;
++        long now = System.currentTimeMillis();
++        int maxReduction = maxReduction(server);
++        if (mspt > msptHigh && reduction < maxReduction) {
++            int before = reduction;
++            reduction++;
++            lastChange = now;
++            apply();
++            LOG.info("[Tachyon] " + t("perf.sim.down", mspt, configured(server) - before, configured(server) - reduction));
++        } else if (mspt < msptLow && reduction > 0 && now - lastChange > RAISE_COOLDOWN_MS) {
++            int before = reduction;
++            reduction--;
++            lastChange = now;
++            apply();
++            LOG.info("[Tachyon] " + t("perf.sim.up", mspt, configured(server) - before, configured(server) - reduction));
++        } else if (reduction > 0 && ticks % 1200 == 0) {
++            apply(); // neu geladene Welten nachziehen
++        }
++    }
++
++    /** Groesste konfigurierte Simulationsdistanz aller Welten (fuer Meldungen). */
++    private static int configured(MinecraftServer server) {
++        int max = 0;
++        for (ServerLevel level : server.getAllLevels()) {
++            max = Math.max(max, level.spigotConfig.simulationDistance);
++        }
++        return max;
++    }
++
++    private static int maxReduction(MinecraftServer server) {
++        return Math.max(0, configured(server) - minDistance);
++    }
++
++    private static void apply() {
++        for (ServerLevel level : MinecraftServer.getServer().getAllLevels()) {
++            int cfg = level.spigotConfig.simulationDistance;
++            level.getChunkSource().setSimulationDistance(Math.max(Math.min(cfg, minDistance), cfg - reduction));
++        }
++    }
++
++    /** @return aktuelle Simulationsdistanz der ersten Welt (fuer /tps) */
++    public static int current() {
++        for (ServerLevel level : MinecraftServer.getServer().getAllLevels()) {
++            int cfg = level.spigotConfig.simulationDistance;
++            return Math.max(Math.min(cfg, minDistance), cfg - reduction);
++        }
++        return 0;
++    }
++
++    /** @return eingestellte Simulationsdistanz der ersten Welt (fuer /tps) */
++    public static int configuredFirst() {
++        for (ServerLevel level : MinecraftServer.getServer().getAllLevels()) {
++            return level.spigotConfig.simulationDistance;
++        }
++        return 0;
++    }
++
++    public static boolean isEnabled() {
++        return enabled;
++    }
++
++    public static double lastMspt() {
++        return lastMspt;
++    }
++}
 diff --git a/src/main/java/dev/tachyon/text/Style.java b/src/main/java/dev/tachyon/text/Style.java
 new file mode 100644
 index 000000000..13aafc5eb
@@ -990,10 +1113,10 @@ index 000000000..052d7bf9b
 +}
 diff --git a/src/main/java/dev/tachyon/world/WorldManager.java b/src/main/java/dev/tachyon/world/WorldManager.java
 new file mode 100644
-index 000000000..1e2b07b2e
+index 000000000..02b95448f
 --- /dev/null
 +++ b/src/main/java/dev/tachyon/world/WorldManager.java
-@@ -0,0 +1,984 @@
+@@ -0,0 +1,1054 @@
 +package dev.tachyon.world;
 +
 +import java.io.File;
@@ -1084,6 +1207,7 @@ index 000000000..1e2b07b2e
 +    private int ticks;
 +    private int trainingTicks;
 +    private int liveTicks;
++    private int pausedTicks;
 +
 +    // Einstellungen
 +    private boolean fastForPlugins;
@@ -1091,6 +1215,10 @@ index 000000000..1e2b07b2e
 +    private int preloadRadius;
 +    private int autoloadInterval;
 +    private int pregenParallel;
++    private int unloadIdleMinutes;
++    /** Welt -> Zeitpunkt, an dem zuletzt ein Spieler darin war (fuer das automatische Auslagern). */
++    private final Map<String, Long> lastOccupied = new HashMap<>();
++    private final Set<String> sleeping = new TreeSet<>();
 +
 +    // Pregenerator
 +    private PregenTask pregen;
@@ -1148,6 +1276,18 @@ index 000000000..1e2b07b2e
 +        }
 +    }
 +
++    /** Kern-Hook: Server pausiert (niemand online) - alle 10 s leere Welten pruefen, ohne die Pause aufzuheben. */
++    public static void pausedTickHook() {
++        WorldManager wm = instance;
++        if (wm == null) {
++            return;
++        }
++        wm.drainQueue(); // z.B. "Welt bereit" auch ohne Spieler melden
++        if (++wm.pausedTicks % 200 == 0) {
++            wm.unloadIdleWorlds();
++        }
++    }
++
 +    /** Kern-Hook: einmal pro Server-Tick auf dem Main-Thread. */
 +    public static void tickHook() {
 +        WorldManager wm = instance;
@@ -1173,6 +1313,11 @@ index 000000000..1e2b07b2e
 +        config.addDefault("world-manager.spawn-preload-radius", 2);
 +        config.addDefault("world-manager.autoload-interval-ticks", 20);
 +        config.addDefault("world-manager.pregen-parallel-chunks", Math.max(4, Runtime.getRuntime().availableProcessors() * 2));
++        config.addDefault("world-manager.unload-idle-minutes", 10);
++        config.addDefault("performance.dynamic-simulation-distance", true);
++        config.addDefault("performance.min-simulation-distance", 4);
++        config.addDefault("performance.mspt-high", 40.0);
++        config.addDefault("performance.mspt-low", 25.0);
 +        config.options().copyDefaults(true);
 +        fastForPlugins = config.getBoolean("world-manager.fast-world-creation-for-plugins");
 +        fastStartup = config.getBoolean("startup.fast-start");
@@ -1182,6 +1327,9 @@ index 000000000..1e2b07b2e
 +        }
 +        autoloadInterval = Math.max(1, config.getInt("world-manager.autoload-interval-ticks"));
 +        pregenParallel = Math.max(1, Math.min(256, config.getInt("world-manager.pregen-parallel-chunks")));
++        unloadIdleMinutes = Math.max(0, config.getInt("world-manager.unload-idle-minutes"));
++        dev.tachyon.perf.DynamicPerformance.configure(config.getBoolean("performance.dynamic-simulation-distance"),
++                config.getInt("performance.min-simulation-distance"), config.getDouble("performance.mspt-high"), config.getDouble("performance.mspt-low"));
 +        saveConfig();
 +    }
 +
@@ -1264,21 +1412,17 @@ index 000000000..1e2b07b2e
 +            }
 +        }
 +
-+        Runnable task;
-+        int budget = 64;
-+        while (budget-- > 0 && (task = mainQueue.poll()) != null) {
-+            try {
-+                task.run();
-+            } catch (Throwable t) {
-+                logger.log(Level.SEVERE, "[WorldManager] background task failed", t);
-+            }
-+        }
++        drainQueue();
 +
 +        if (pregen != null) {
 +            pregen.tick(slowTick);
 +        }
 +        if (++liveTicks % 5 == 0) {
 +            updateLiveBars();
++        }
++        dev.tachyon.perf.DynamicPerformance.tick();
++        if (liveTicks % 200 == 0) {
++            unloadIdleWorlds();
 +        }
 +
 +        // AOT-Trainingslauf (start.bat): kurz laufen lassen, damit Java den Start-Cache aufzeichnen kann, dann beenden.
@@ -1297,6 +1441,19 @@ index 000000000..1e2b07b2e
 +                    loadOrCreate(spec, true, w -> { },
 +                            err -> logger.warning("[WorldManager] " + err));
 +                }
++            }
++        }
++    }
++
++    /** Erledigt Rueckmeldungen aus dem Hintergrund (max. 64 pro Tick) auf dem Main-Thread. */
++    private void drainQueue() {
++        Runnable task;
++        int budget = 64;
++        while (budget-- > 0 && (task = mainQueue.poll()) != null) {
++            try {
++                task.run();
++            } catch (Throwable t) {
++                logger.log(Level.SEVERE, "[WorldManager] background task failed", t);
 +            }
 +        }
 +    }
@@ -1332,6 +1489,39 @@ index 000000000..1e2b07b2e
 +            }
 +            TachyonConsole.live("world:" + st.world.getName(), fraction, t("live.world", st.world.getName(), phase), (System.nanoTime() - st.startNanos) / 1e9);
 +        }
++    }
++
++    /**
++     * Welten des World-Managers, in denen seit unload-idle-minutes kein Spieler war, speichern und aus dem RAM nehmen.
++     * Sie laden bei Bedarf (/wm tp, Plugin-API) ohne Server-Haenger wieder. Standard- und Plugin-Welten bleiben unberuehrt.
++     */
++    private void unloadIdleWorlds() {
++        if (unloadIdleMinutes <= 0) {
++            return;
++        }
++        long now = System.currentTimeMillis();
++        for (World w : new ArrayList<>(Bukkit.getWorlds())) {
++            String name = w.getName();
++            if (!w.getPlayers().isEmpty()) {
++                lastOccupied.put(name, now);
++                continue;
++            }
++            if (!managedWorlds().contains(name) || isProtected(name) || !isReady(w) || (pregen != null && pregen.world.equals(w))) {
++                continue;
++            }
++            long since = lastOccupied.computeIfAbsent(name, k -> now);
++            if (now - since >= unloadIdleMinutes * 60_000L && unload(name, true) == null) {
++                sleeping.add(name);
++                lastOccupied.remove(name);
++                logger.info("[WorldManager] " + t("wm.log.idle_unload", name, unloadIdleMinutes));
++            }
++        }
++    }
++
++    /** @return Welten, die wegen Leerlauf ausgelagert wurden und bei Bedarf wieder laden */
++    public Set<String> sleepingWorlds() {
++        sleeping.removeIf(n -> Bukkit.getWorld(n) != null);
++        return sleeping;
 +    }
 +
 +    // ------------------------------------------------------------------ Laden / Erstellen
@@ -1388,6 +1578,9 @@ index 000000000..1e2b07b2e
 +            return;
 +        }
 +        double ms = (System.nanoTime() - start) / 1_000_000.0;
++
++        lastOccupied.put(world.getName(), System.currentTimeMillis());
++        sleeping.remove(world.getName());
 +
 +        LoadState st = new LoadState();
 +        st.created = isNew;
@@ -2539,7 +2732,7 @@ index c2177e77a..e2a728cd0 100644
                  DedicatedServer dedicatedserver1 = new DedicatedServer(optionset, worldLoader.get(), thread, levelstoragesource_levelstorageaccess, packrepository, worldstem, Optional.empty(), dedicatedserversettings, DataFixers.getDataFixer(), services, managementserver, notificationmanager);
  
 diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
-index 4545f039c..49f4bce00 100644
+index 4545f039c..71eb07325 100644
 --- a/src/main/java/net/minecraft/server/MinecraftServer.java
 +++ b/src/main/java/net/minecraft/server/MinecraftServer.java
 @@ -526,8 +526,11 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -2618,7 +2811,15 @@ index 4545f039c..49f4bce00 100644
          });
      }
  
-@@ -1564,6 +1595,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1396,6 +1427,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+                 }
+ 
+                 this.server.getScheduler().mainThreadHeartbeat(); // CraftBukkit
++                dev.tachyon.world.WorldManager.pausedTickHook(); // Tachyon - leere Welten auch in der Pause auslagern
+                 this.tickConnection();
+                 return;
+             }
+@@ -1564,6 +1596,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          while (!processQueue.isEmpty()) {
              processQueue.remove().run();
          }
@@ -2626,7 +2827,7 @@ index 4545f039c..49f4bce00 100644
          SpigotTimings.processQueueTimer.stopTiming(); // Spigot
          // CraftBukkit end
  
-@@ -1710,7 +1742,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1710,7 +1743,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      public String getServerModName() {
@@ -3066,10 +3267,10 @@ index 2891e2537..6830d544d 100644
      }
  
 diff --git a/src/main/java/org/spigotmc/TicksPerSecondCommand.java b/src/main/java/org/spigotmc/TicksPerSecondCommand.java
-index f5b6dec1c..159462667 100644
+index f5b6dec1c..6385c71b4 100644
 --- a/src/main/java/org/spigotmc/TicksPerSecondCommand.java
 +++ b/src/main/java/org/spigotmc/TicksPerSecondCommand.java
-@@ -23,20 +23,118 @@ public class TicksPerSecondCommand extends Command
+@@ -23,20 +23,126 @@ public class TicksPerSecondCommand extends Command
          {
              return true;
          }
@@ -3143,6 +3344,14 @@ index f5b6dec1c..159462667 100644
 +        sender.sendMessage( m + " " + dev.tachyon.i18n.Lang.t( "tps.dynamic.label" ) + tx
 +                + dev.tachyon.i18n.Lang.t( "tps.dynamic.range", mb( minHeap ), mb( rt.maxMemory() ) ) + sep
 +                + dev.tachyon.i18n.Lang.t( "tps.dynamic.reserved", mb( rt.totalMemory() ) ) + sep + release );
++        int simNow = dev.tachyon.perf.DynamicPerformance.current();
++        int simCfg = dev.tachyon.perf.DynamicPerformance.configuredFirst();
++        String sim = !dev.tachyon.perf.DynamicPerformance.isEnabled() ? dev.tachyon.i18n.Lang.t( "tps.balance.off" )
++                : simNow < simCfg ? dev.tachyon.text.Style.col( sender, dev.tachyon.text.Style.C_WARN ) + dev.tachyon.i18n.Lang.t( "tps.balance.sim.reduced", simNow, simCfg ) + tx
++                : dev.tachyon.i18n.Lang.t( "tps.balance.sim.full", simCfg );
++        dev.tachyon.world.WorldManager wmgr = dev.tachyon.world.WorldManager.get();
++        int asleep = wmgr == null ? 0 : wmgr.sleepingWorlds().size();
++        sender.sendMessage( m + " " + dev.tachyon.i18n.Lang.t( "tps.balance.label" ) + tx + sim + sep + dev.tachyon.i18n.Lang.t( "tps.balance.sleeping", asleep ) );
 +        // Tachyon end
 +        sender.sendMessage( m + " " + dev.tachyon.i18n.Lang.t( "tps.world.label" ) + tx
 +                + dev.tachyon.i18n.Lang.t( "tps.world", org.bukkit.Bukkit.getWorlds().size() ) + sep + dev.tachyon.i18n.Lang.t( "tps.chunks", chunks )
@@ -3229,10 +3438,10 @@ index 0ff3f750f..941d3351a 100644
                  <MarkerFilter marker="NETWORK_PACKETS" onMatch="DENY" onMismatch="NEUTRAL" />
 diff --git a/src/main/resources/tachyon/lang/de.properties b/src/main/resources/tachyon/lang/de.properties
 new file mode 100644
-index 000000000..243586c67
+index 000000000..8fdff82b4
 --- /dev/null
 +++ b/src/main/resources/tachyon/lang/de.properties
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,185 @@
 +# Tachyon - deutsche Texte
 +console.tagline=Minecraft-Server ohne Lags
 +console.ram=RAM
@@ -3293,7 +3502,7 @@ index 000000000..243586c67
 +wm.log.folder_missing=Ordner fuer Welt '%s' fehlt - uebersprungen.
 +wm.log.resume_spawn=Setze unterbrochene Spawnsuche fuer '%s' fort...
 +wm.log.training_done=AOT-Training abgeschlossen - Server wird beendet, Java schreibt jetzt den Start-Cache...
-+wm.config.header=Tachyon Konfiguration\n\nlanguage: de oder en - Sprache aller Tachyon-Texte\nstartup.fast-start: true = nicht auf die Spawnsuche warten, sie laeuft nach 'Done' im Hintergrund\nworld-manager.fast-world-creation-for-plugins: true = auch Plugin-Welten (z.B. Multiverse) ohne Server-Haenger\nworld-manager.spawn-preload-radius: Chunks um den Spawn, die vor 'bereit' geladen werden\nworld-manager.autoload-interval-ticks: Abstand zwischen zwei Welten beim automatischen Laden\nworld-manager.pregen-parallel-chunks: gleichzeitige Chunks bei /wm pregen (pausiert automatisch bei Lag)\nworlds: wird vom /wm Befehl verwaltet
++wm.config.header=Tachyon Konfiguration\n\nlanguage: de oder en - Sprache aller Tachyon-Texte\nstartup.fast-start: true = nicht auf die Spawnsuche warten, sie laeuft nach 'Done' im Hintergrund\nworld-manager.fast-world-creation-for-plugins: true = auch Plugin-Welten (z.B. Multiverse) ohne Server-Haenger\nworld-manager.spawn-preload-radius: Chunks um den Spawn, die vor 'bereit' geladen werden\nworld-manager.autoload-interval-ticks: Abstand zwischen zwei Welten beim automatischen Laden\nworld-manager.pregen-parallel-chunks: gleichzeitige Chunks bei /wm pregen (pausiert automatisch bei Lag)\nworlds: wird vom /wm Befehl verwaltet\nworld-manager.unload-idle-minutes: Welten des World-Managers ohne Spieler nach so vielen Minuten auf die SSD auslagern (0 = aus)\nperformance.dynamic-simulation-distance: unter Last die Simulationsdistanz automatisch senken und spaeter wieder anheben\nperformance.min-simulation-distance / mspt-high / mspt-low: Untergrenze und Schwellen (ms pro Tick) der Lastregelung
 +
 +# World-Manager (Fehler/Meldungen)
 +wm.err.invalid_name=Ungueltiger Weltname. Erlaubt: A-Z, a-z, 0-9, _ und - (max. 64 Zeichen).
@@ -3410,12 +3619,20 @@ index 000000000..243586c67
 +tps.dynamic.reserved=gerade reserviert %s
 +tps.dynamic.release.on=Rueckgabe im Leerlauf alle %d s
 +tps.dynamic.release.off=Rueckgabe im Leerlauf aus
++perf.sim.down=Server unter Last (MSPT %.1f ms) - Simulationsdistanz %d -> %d, damit es nicht laggt
++perf.sim.up=Last wieder normal (MSPT %.1f ms) - Simulationsdistanz %d -> %d
++wm.log.idle_unload=Welt '%s' seit %d min leer - auf die SSD ausgelagert (RAM frei). Laedt bei Bedarf automatisch neu.
++tps.balance.label=Steuerung 
++tps.balance.sim.full=Simulation volle %d Chunks
++tps.balance.sim.reduced=Simulation gedrosselt %d von %d Chunks
++tps.balance.off=Lastregelung aus
++tps.balance.sleeping=%d Welt(en) ausgelagert
 diff --git a/src/main/resources/tachyon/lang/en.properties b/src/main/resources/tachyon/lang/en.properties
 new file mode 100644
-index 000000000..09c4ef86a
+index 000000000..d721b60ef
 --- /dev/null
 +++ b/src/main/resources/tachyon/lang/en.properties
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,185 @@
 +# Tachyon - English texts
 +console.tagline=Minecraft server without lag
 +console.ram=RAM
@@ -3476,7 +3693,7 @@ index 000000000..09c4ef86a
 +wm.log.folder_missing=Folder for world '%s' is missing - skipped.
 +wm.log.resume_spawn=Resuming interrupted spawn search for '%s'...
 +wm.log.training_done=AOT training finished - stopping the server, Java now writes the startup cache...
-+wm.config.header=Tachyon configuration\n\nlanguage: de or en - language of all Tachyon texts\nstartup.fast-start: true = don't wait for the spawn search, it runs in the background after 'Done'\nworld-manager.fast-world-creation-for-plugins: true = plugin worlds (e.g. Multiverse) are created without server freezes too\nworld-manager.spawn-preload-radius: chunks around spawn that are loaded before a world is 'ready'\nworld-manager.autoload-interval-ticks: delay between two worlds when loading automatically\nworld-manager.pregen-parallel-chunks: chunks generated at once by /wm pregen (pauses automatically on lag)\nworlds: managed by the /wm command
++wm.config.header=Tachyon configuration\n\nlanguage: de or en - language of all Tachyon texts\nstartup.fast-start: true = don't wait for the spawn search, it runs in the background after 'Done'\nworld-manager.fast-world-creation-for-plugins: true = plugin worlds (e.g. Multiverse) are created without server freezes too\nworld-manager.spawn-preload-radius: chunks around spawn that are loaded before a world is 'ready'\nworld-manager.autoload-interval-ticks: delay between two worlds when loading automatically\nworld-manager.pregen-parallel-chunks: chunks generated at once by /wm pregen (pauses automatically on lag)\nworlds: managed by the /wm command\nworld-manager.unload-idle-minutes: offload world-manager worlds without players to disk after this many minutes (0 = off)\nperformance.dynamic-simulation-distance: lower the simulation distance under load and raise it again later\nperformance.min-simulation-distance / mspt-high / mspt-low: lower limit and thresholds (ms per tick) of the load control
 +
 +# World manager (errors/messages)
 +wm.err.invalid_name=Invalid world name. Allowed: A-Z, a-z, 0-9, _ and - (max. 64 characters).
@@ -3593,6 +3810,14 @@ index 000000000..09c4ef86a
 +tps.dynamic.reserved=currently reserved %s
 +tps.dynamic.release.on=returned when idle every %d s
 +tps.dynamic.release.off=return when idle off
++perf.sim.down=Server under load (MSPT %.1f ms) - simulation distance %d -> %d to avoid lag
++perf.sim.up=Load back to normal (MSPT %.1f ms) - simulation distance %d -> %d
++wm.log.idle_unload=World '%s' empty for %d min - offloaded to disk (RAM freed). Loads again automatically when needed.
++tps.balance.label=Control  
++tps.balance.sim.full=simulation full %d chunks
++tps.balance.sim.reduced=simulation throttled %d of %d chunks
++tps.balance.off=load control off
++tps.balance.sleeping=%d world(s) offloaded
 diff --git a/src/main/resources/tachyon/server-icon.png b/src/main/resources/tachyon/server-icon.png
 new file mode 100644
 index 0000000000000000000000000000000000000000..f86e4b5fc16a9980013c06ac72c0baf4156aaf0b
