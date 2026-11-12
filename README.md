@@ -45,10 +45,10 @@ Wie gut kommt Tachyon mit **1, 2 oder 3 CPU-Kernen**, einer **schwachen CPU** un
 
 | | Spigot | Tachyon |
 |---|---:|---:|
-| Welt erstellen auf **1 schwachen Kern** | 12,5 – 14,8 s Hänger | **0,6 – 1,1 s** |
-| Welt erstellen auf **1 Kern** | 6,4 – 8,7 s Hänger | **0,16 – 0,27 s** |
-| 121 Chunks auf **1 schwachen Kern** (384 / 512 MB) | 35,4 s | **32,8 s / 19,7 s** |
-| Welt erstellen mit **dem ganzen PC** | 1,3 s Hänger | **0,15 s** |
+| Welt erstellen auf **1 schwachen Kern** (kalt) | 12,5 – 14,8 s Hänger | **0,6 – 1,1 s** |
+| Welt erstellen auf **1 Kern** (kalt / warm) | 6,4 – 8,7 s / 2,4 s | **0,16 – 0,27 s / 0,32 s** |
+| Welt erstellen mit **dem ganzen PC** (kalt / warm) | 1,3 s / 0,31 s | **0,15 s / 0,06 s** |
+| Chunks generieren | gleich schnell | gleich schnell |
 | Kleinster lauffähiger RAM | 192 – 256 MB | 192 – 256 MB |
 
 ➡️ **[Alle Statistiken, Grafiken und Messbedingungen in STATS.md](STATS.md)**

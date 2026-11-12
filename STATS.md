@@ -3,7 +3,9 @@
 Wie schlägt sich Tachyon gegen den originalen Spigot, wenn es eng wird, und wenn es gar nicht eng ist?
 Getestet mit **1, 2 und 3 CPU-Kernen**, einem **schwachen Effizienz-Kern** (vergleichbar mit einem günstigen VPS), **RAM von 96 MB bis 8 GB** und einmal mit **dem kompletten PC**.
 
-> **Kurz gesagt:** Beim Erstellen von Welten hängt Tachyon **10- bis 40-mal kürzer** als Spigot – auf jeder Hardware. Auf schwachen CPUs startet Tachyon schneller und generiert Chunks bis zu doppelt so schnell. Mit mehr Kernen holt Spigot beim reinen Chunk-Generieren auf. Den minimalen RAM schaffen beide fast gleich – und das schreiben wir ehrlich dazu.
+> **Kurz gesagt:** Beim Erstellen von Welten hängt Tachyon deutlich kürzer als Spigot – auf einem frisch gestarteten Server **9- bis 40-mal**, auf einem warm gelaufenen Server **5- bis 8-mal**. Tachyon startet schneller. Beim reinen **Chunk-Generieren sind beide gleich schnell**, und beim minimalen RAM liegen beide fast gleichauf.
+
+> ⚠️ **Korrektur (12.11.):** Eine frühere Version dieser Seite zeigte Tachyon auf schwachen CPUs beim Chunk-Generieren bis zu doppelt so schnell. Das war ein **Messfehler** meines Benchmarks – Details unten unter „Korrektur: Chunk-Generieren“. Fair gemessen sind beide gleich schnell.
 
 ---
 
@@ -21,14 +23,21 @@ Während eine neue Welt erstellt wird, friert Spigot den kompletten Server ein �
 | 3 CPU-Kerne | 1,6 – 2,2 s | **0,08 – 0,13 s** | **~15–28×** |
 | Ganzer PC (20 Threads) | 1,3 s | **0,15 s** | **~9×** |
 
+Diese Werte sind **kalt** gemessen – direkt nach dem Start, wenn Javas JIT-Compiler den Code für die Weltgenerierung noch nicht optimiert hat. Auf einem Server, der schon eine Weile läuft, ist Spigot schneller. Deshalb auch **warm** gemessen (erst 121 Chunks generiert, dann eine Welt erstellt):
+
+| Warm gemessen | Spigot | Tachyon | Faktor |
+|---|---:|---:|---:|
+| 1 CPU-Kern, 512 MB | 2.418 ms | **320 ms** | **~7,5×** |
+| Ganzer PC, 8 GB | 311 ms | **56 ms** | **~5,5×** |
+
 ## Chunks generieren: wie schnell entsteht neues Gelände?
 
-121 noch nie generierte Chunks laden – so wie Spieler, die neues Gelände erkunden.
+121 noch nie generierte Chunks laden – so wie Spieler, die neues Gelände erkunden. **Ergebnis: gleich schnell.** Tachyon verändert die Weltgenerierung selbst nicht.
 
-<p align="center"><img src="assets/stats/lowres-chunks.png" width="100%"></p>
-
-- **Schwache Hardware:** Tachyon ist klar schneller – auf einem E-Kern **19,7 s statt 35,4 s**, auf einem P-Kern mit 512 MB **8,2 s statt 17,0 s**.
-- **Ab 2 Kernen:** beide etwa gleich schnell (z. B. 3 Kerne / 384 MB: 4,4 s vs. 5,0 s, bei 192 MB war Spigot sogar etwas schneller). Mehr Kerne gleichen Spigots Nachteil aus – ehrlich gesagt hat Tachyon hier keinen Vorsprung.
+| Fair gemessen (beide kalt) | Spigot | Tachyon |
+|---|---:|---:|
+| 1 CPU-Kern, 512 MB | 18,8 s | 18,6 s |
+| Ganzer PC, 8 GB | 4,0 s | 3,7 s |
 
 ## Minimaler RAM: wie klein geht es?
 
@@ -52,7 +61,7 @@ Tachyon passt sich an: Unter ~400 MB lädt es beim Erstellen einer Welt nur noch
 |---|---:|---:|
 | Start bis „Done“ | 7,4 s | **6,0 s** |
 | Hänger beim Welt erstellen | 1.284 ms | **146 ms** |
-| 625 neue Chunks generieren | 7,0 s | **6,4 s** |
+| 625 neue Chunks generieren | 7,0 s | 6,4 s (im Rahmen der Messschwankung gleich) |
 | Leerlauf (ms pro Tick) | 0,18 ms | 0,18 ms |
 | Heap nach GC / Prozess gesamt | 2.463 MB / 4.226 MB | 2.380 MB / 4.342 MB |
 
@@ -136,19 +145,23 @@ Weil während der Tests nebenbei am PC gearbeitet wurde, habe ich den auffällig
 
 Die Abweichungen liegen bei wenigen Prozent – die Ergebnisse sind reproduzierbar.
 
-**Warum ist Tachyon auf *einem* Kern beim Chunk-Generieren schneller?** Untersucht – Ursache noch offen:
+### Korrektur: Chunk-Generieren
 
-| Gegenprobe (1 Kern, 512 MB, 121 Chunks) | Spigot | Tachyon |
-|---|---:|---:|
-| Ohne vorheriges Welt-Erstellen | 17,5 s | 9,6 s |
-| Welt erstellen, 3 s warten | 12,6 s | 7,9 s |
-| Welt erstellen, 30 s warten | 13,6 s | 8,3 s |
-| **Derselbe Kern, nacheinander, beide Reihenfolgen** (Mittel aus 2) | 18,4 s | 11,1 s |
-| Tachyon mit abgeschaltetem Schnellstart | – | 11,3 – 12,3 s |
+Auf einem Kern sah Tachyon beim Chunk-Test bis zu doppelt so schnell aus – reproduzierbar, auch auf demselben Kern. Eingegrenzt per Bisect (Tachyon-Teilbauten gegen sauber gebautes Spigot):
 
-- Ausgeschlossen: unterschiedliche CPU-Kerne, Reihenfolge, Reste vom Welt-Erstellen, Tachyons Schnellstart, unterschiedliche Spigot-Stände (beide basieren auf Build 4664).
-- Java-Flight-Recorder-Profil: beide verbringen ihre Rechenzeit in denselben Methoden der Weltgenerierung; Spigot führt aber pro Sekunde weniger Java-Code aus und wartet mehr.
-- Ab 2 Kernen verschwindet der Unterschied – für Server mit mehreren Kernen ist er daher kaum relevant.
+| Variante (1 Kern, 512 MB, 121 Chunks) | Dauer |
+|---|---:|
+| Spigot, selbst gebaut | 21,0 s |
+| Tachyon ohne Änderungen an MinecraftServer/ChunkGenerator/SpigotWorldConfig | 19,5 s |
+| Tachyon ohne Änderungen an MinecraftServer | 18,6 s |
+| Tachyon ohne seine Tick-Hooks | 21,5 s |
+| **Tachyon komplett, aber ohne offene Spawnsuche in der Testwelt** | **19,8 s** |
+
+**Ursache:** Beim Erzeugen der Testwelten liefen sechs Server gleichzeitig; Tachyons Spawnsuche im Hintergrund war dabei nicht rechtzeitig fertig. Tachyon hat sie deshalb in jedem Testlauf fortgesetzt – und dabei Chunks generiert, **bevor** der Chunk-Test begann. Dadurch hatte Javas JIT-Compiler den Weltgenerierungs-Code schon optimiert, während Spigot ihn mitten im Test (auf demselben einzigen Kern) kompilieren musste. Kein echter Vorteil, sondern ein Messfehler.
+
+**Behoben:** Der Benchmark wartet jetzt, bis die Spawnsuche abgeschlossen ist, bevor die Testwelt gespeichert wird. Außerdem prüft Tachyons Spawnsuche die Kandidaten-Chunks jetzt paketweise (9 gleichzeitig) statt einzeln – sie wird damit deutlich schneller fertig.
+
+Die Spalten „121 Chunks“ in den Tabellen unten stammen noch aus den betroffenen Läufen und sind für Tachyon zu gut – fair gemessen sind beide gleich schnell (siehe oben).
 
 **Hinweise zur Ehrlichkeit**
 - Beim Chunk-Test fordert das Mess-Plugin Chunks über die Plugin-API an. Diese lädt bei **beiden** Servern synchron, deshalb ist dort die *Dauer* aussagekräftig, nicht die TPS.

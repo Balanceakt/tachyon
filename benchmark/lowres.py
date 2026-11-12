@@ -150,7 +150,16 @@ def prepare_base(name, jar, tag, port, cpus):
     log(f"[{tag}] Vorbereitung: Welt einmal erzeugen...")
     r = Run(tag, base, [JAVA, "-Xmx2G", *COMMON, "-jar", "server.jar", "nogui"], cpus=cpus)
     r.wait_for(DONE_RE.search, 600)
-    time.sleep(10)  # Tachyon: Spawnsuche im Hintergrund fertig werden lassen
+    time.sleep(10)
+    # Fair: Tachyons Spawnsuche im Hintergrund muss fertig sein, bevor die Testwelt gespeichert wird.
+    # Sonst setzt Tachyon sie in jedem Testlauf fort und waermt dabei den JIT-Compiler vor (verfaelscht Chunk-Tests).
+    cfg = base / "tachyon.yml"
+    waited = 0
+    while cfg.exists() and "pending-spawn" in cfg.read_text(encoding="utf-8", errors="replace") and waited < 180:
+        time.sleep(2)
+        waited += 2
+    if waited:
+        log(f"[{tag}] Spawnsuche im Hintergrund nach weiteren {waited} s abgeschlossen")
     r.stop()
     snap = base / "_snapshot"
     snap.mkdir()
